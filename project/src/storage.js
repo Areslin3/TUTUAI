@@ -440,34 +440,45 @@ export const normalizeState = (state) => {
   };
 };
 
+const tryWriteStore = (payload) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, typeof payload === "string" ? payload : JSON.stringify(payload));
+    return true;
+  } catch (e) {
+    console.error("localStorage write failed:", e);
+    return false;
+  }
+};
+
 export const loadState = () => {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) {
     const initial = makeInitialState();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(initial));
+    tryWriteStore(initial);
     return initial;
   }
 
   try {
     const parsed = JSON.parse(raw);
     const normalized = normalizeState(parsed);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+    tryWriteStore(normalized);
     return normalized;
   } catch {
     const initial = makeInitialState();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(initial));
+    tryWriteStore(initial);
     return initial;
   }
 };
 
+/** @returns {boolean} false = 配额满或写入失败，不应再抛错以免整页崩溃 */
 export const saveState = (state) => {
-  localStorage.setItem(
-    STORAGE_KEY,
-    JSON.stringify({
-      ...state,
-      ...normalizeState(state),
-    }),
-  );
+  try {
+    const normalized = normalizeState(state);
+    return tryWriteStore(normalized);
+  } catch (e) {
+    console.error("saveState failed:", e);
+    return false;
+  }
 };
 
 export const loadSession = () => {

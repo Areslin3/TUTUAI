@@ -298,26 +298,36 @@ function App() {
   const tutorialReturnRef = useRef(null);
   const lastRemoteUpdatedAtRef = useRef(null);
   const syncReadyRef = useRef(false);
+  const flushToLocalStorage = (normalizedState) => {
+    if (saveState(normalizedState)) return true;
+    setSyncState({
+      status: "本地保存失败",
+      detail:
+        "浏览器存储可能已满（附件多或大文件时常见）。请删除部分附件后再试；若此刻刷新，仅停留在内存的更改可能丢失。已写入云端的数据重新打开后仍可拉取。",
+    });
+    return false;
+  };
+
   const persist = async (next, { requireCloud = false } = {}) => {
     const normalizedNext = normalizeState(next);
 
     if (!cloudSyncEnabled) {
       if (requireCloud) throw new Error("当前未启用云端同步，附件只会保存在本机，其他账号看不到。");
       setData(normalizedNext);
-      saveState(normalizedNext);
+      flushToLocalStorage(normalizedNext);
       return normalizedNext;
     }
 
     if (!syncReadyRef.current) {
       if (requireCloud) throw new Error("云端同步还在初始化，请等右上角显示“云端已同步”后再上传。");
       setData(normalizedNext);
-      saveState(normalizedNext);
+      flushToLocalStorage(normalizedNext);
       return normalizedNext;
     }
 
     if (!requireCloud) {
       setData(normalizedNext);
-      saveState(normalizedNext);
+      flushToLocalStorage(normalizedNext);
     }
 
     try {
@@ -334,7 +344,7 @@ function App() {
         toSave = normalizeState(merged);
         if (changed && !requireCloud) {
           setData(toSave);
-          saveState(toSave);
+          flushToLocalStorage(toSave);
         }
       }
       const updatedAt = await saveCloudState(toSave);
@@ -345,7 +355,7 @@ function App() {
         detail: `最后同步：${formatTime(updatedAt || remoteRowAt || new Date().toISOString())}`,
       });
       setData(toSave);
-      saveState(toSave);
+      flushToLocalStorage(toSave);
       return toSave;
     } catch (error) {
       setSyncState({
@@ -1193,7 +1203,7 @@ function App() {
         const merged = normalizeState(mergedOnce);
         if (updatedAt) lastRemoteUpdatedAtRef.current = updatedAt;
         if (beforeRevision !== stateRevision(merged)) {
-          saveState(merged);
+          flushToLocalStorage(merged);
           return merged;
         }
         return prev;
@@ -1234,7 +1244,7 @@ function App() {
           setData((prev) => {
             const { state: mergedOnce } = mergeInboundCollaborativeState(prev, normalizedRemote);
             const merged = normalizeState(mergedOnce);
-            saveState(merged);
+            flushToLocalStorage(merged);
             return merged;
           });
           lastRemoteUpdatedAtRef.current = remoteAt;
@@ -1244,7 +1254,7 @@ function App() {
           });
         } else if (isEmptyCoreState(remoteState)) {
           setData(fallbackState);
-          saveState(fallbackState);
+          flushToLocalStorage(fallbackState);
           const at = await saveCloudState(fallbackState);
           if (cancelled) return;
           lastRemoteUpdatedAtRef.current = at || lastRemoteUpdatedAtRef.current;
@@ -1254,7 +1264,7 @@ function App() {
           });
         } else if (remoteState) {
           setData(fallbackState);
-          saveState(fallbackState);
+          flushToLocalStorage(fallbackState);
           const at = await saveCloudState(fallbackState);
           if (cancelled) return;
           lastRemoteUpdatedAtRef.current = at || lastRemoteUpdatedAtRef.current;
@@ -1265,7 +1275,7 @@ function App() {
         } else {
           const at = await saveCloudState(fallbackState);
           setData(fallbackState);
-          saveState(fallbackState);
+          flushToLocalStorage(fallbackState);
           if (cancelled) return;
           lastRemoteUpdatedAtRef.current = at || lastRemoteUpdatedAtRef.current;
           setSyncState({
