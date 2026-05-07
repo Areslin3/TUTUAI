@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { OverlayScrollbarsComponent } from "overlayscrollbars-react";
 import {
@@ -2230,7 +2231,7 @@ function TaskDetail({
 
   const submitTaskAttachments = async () => {
     if (!pendingTaskFiles.length || taskUploadBusy) return;
-    const list = pendingTaskFiles;
+    const list = [...pendingTaskFiles];
     const n = list.length;
     const namePreview = list
       .slice(0, 4)
@@ -2248,13 +2249,17 @@ function TaskDetail({
     setUploadProgress(0);
     try {
       await addAttachments(task.id, list, (p) => setUploadProgress(p));
-      setPendingTaskFiles([]);
-      setTaskUploadInputKey((k) => k + 1);
-      setToastPayload({ key: Date.now(), message: `上传成功！已将 ${n} 个文件同步到任务` });
+    } catch (err) {
+      console.error(err);
+      alert(err?.message || "附件上传失败，请重试。");
+      return;
     } finally {
       setUploadProgress(null);
       setTaskUploadBusy(false);
     }
+    setPendingTaskFiles([]);
+    setTaskUploadInputKey((k) => k + 1);
+    setToastPayload({ key: Date.now(), message: `上传成功！已将 ${n} 个文件同步到任务` });
   };
 
   const timelineLogs = useMemo(() => {
@@ -2279,25 +2284,33 @@ function TaskDetail({
   );
   const hasMoreTimelineLogs = visibleTimelineLogs.length < timelineLogs.length;
 
+  const toastLayer =
+    typeof document !== "undefined"
+      ? createPortal(
+          <AnimatePresence>
+            {toastPayload && (
+              <motion.div
+                key={toastPayload.key}
+                className="toast-banner toast-banner--bubble"
+                role="status"
+                aria-live="polite"
+                initial={{ opacity: 0, y: 32, scale: 0.85, x: "-50%" }}
+                animate={{ opacity: 1, y: 0, scale: 1, x: "-50%" }}
+                exit={{ opacity: 0, y: 16, scale: 0.92, x: "-50%" }}
+                transition={{ type: "spring", stiffness: 460, damping: 28 }}
+              >
+                <CheckCircle2 size={22} strokeWidth={2.5} aria-hidden />
+                <span>{toastPayload.message}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>,
+          document.body,
+        )
+      : null;
+
   return (
     <motion.div className="detail-page" {...cinematicMotion}>
-      <AnimatePresence>
-        {toastPayload && (
-          <motion.div
-            key={toastPayload.key}
-            className="toast-banner toast-banner--bubble"
-            role="status"
-            aria-live="polite"
-            initial={{ opacity: 0, y: 32, scale: 0.85, x: "-50%" }}
-            animate={{ opacity: 1, y: 0, scale: 1, x: "-50%" }}
-            exit={{ opacity: 0, y: 16, scale: 0.92, x: "-50%" }}
-            transition={{ type: "spring", stiffness: 460, damping: 28 }}
-          >
-            <CheckCircle2 size={22} strokeWidth={2.5} aria-hidden />
-            <span>{toastPayload.message}</span>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {toastLayer}
       <button className="text-btn" onClick={back}><ChevronLeft size={17} /> 返回模块</button>
       <section className="detail-head">
         <div>
