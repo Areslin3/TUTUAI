@@ -1,0 +1,26 @@
+{
+  "name": "tutu-deploy-progress",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build && node scripts/copy-entry.mjs",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.105.1",
+    "@vitejs/plugin-react": "^5.1.1",
+    "framer-motion": "^12.38.0",
+    "lucide-react": "^0.561.0",
+    "overlayscrollbars": "^2.15.1",
+    "overlayscrollbars-react": "^0.5.6",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "vite": "^7.3.0"
+  },
+  "devDependencies": {
+    "netlify-cli": "^26.0.0",
+    "playwright-core": "^1.59.1"
+  }
+}
