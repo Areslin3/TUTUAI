@@ -298,37 +298,63 @@ function App() {
   const tutorialReturnRef = useRef(null);
   const lastRemoteUpdatedAtRef = useRef(null);
   const syncReadyRef = useRef(false);
-  const persist = (next) => {
+  const persist = async (next, { requireCloud = false } = {}) => {
     const normalizedNext = normalizeState(next);
-    setData(normalizedNext);
-    saveState(normalizedNext);
-    if (!cloudSyncEnabled || !syncReadyRef.current) return;
-    void (async () => {
-      try {
-        const { state: remote, updatedAt: remoteRowAt } = await fetchCloudStateWithMeta();
-        let toSave = normalizedNext;
-        if (remote && hasCoreStateShape(remote) && !isEmptyCoreState(remote)) {
-          const { state: merged, changed } = mergeCollaborativeState(normalizedNext, normalizeState(remote));
-          toSave = normalizeState(merged);
-          if (changed) {
-            setData(toSave);
-            saveState(toSave);
-          }
-        }
-        const updatedAt = await saveCloudState(toSave);
-        if (updatedAt) lastRemoteUpdatedAtRef.current = updatedAt;
-        else if (remoteRowAt) lastRemoteUpdatedAtRef.current = remoteRowAt;
+
+    if (!cloudSyncEnabled) {
+      if (requireCloud) throw new Error("当前未启用云端同步，附件只会保存在本机，其他账号看不到。");
+      setData(normalizedNext);
+      saveState(normalizedNext);
+      return normalizedNext;
+    }
+
+    if (!syncReadyRef.current) {
+      if (requireCloud) throw new Error("云端同步还在初始化，请等右上角显示“云端已同步”后再上传。");
+      setData(normalizedNext);
+      saveState(normalizedNext);
+      return normalizedNext;
+    }
+
+    if (!requireCloud) {
+      setData(normalizedNext);
+      saveState(normalizedNext);
+    }
+
+    try {
+      if (requireCloud) {
         setSyncState({
-          status: "云端已同步",
-          detail: `最后同步：${formatTime(updatedAt || remoteRowAt || new Date().toISOString())}`,
-        });
-      } catch (error) {
-        setSyncState({
-          status: "同步失败",
-          detail: error?.message || "请检查 Supabase 配置",
+          status: "同步中",
+          detail: "正在把附件写入云端...",
         });
       }
-    })();
+      const { state: remote, updatedAt: remoteRowAt } = await fetchCloudStateWithMeta();
+      let toSave = normalizedNext;
+      if (remote && hasCoreStateShape(remote) && !isEmptyCoreState(remote)) {
+        const { state: merged, changed } = mergeCollaborativeState(normalizedNext, normalizeState(remote));
+        toSave = normalizeState(merged);
+        if (changed && !requireCloud) {
+          setData(toSave);
+          saveState(toSave);
+        }
+      }
+      const updatedAt = await saveCloudState(toSave);
+      if (updatedAt) lastRemoteUpdatedAtRef.current = updatedAt;
+      else if (remoteRowAt) lastRemoteUpdatedAtRef.current = remoteRowAt;
+      setSyncState({
+        status: "云端已同步",
+        detail: `最后同步：${formatTime(updatedAt || remoteRowAt || new Date().toISOString())}`,
+      });
+      setData(toSave);
+      saveState(toSave);
+      return toSave;
+    } catch (error) {
+      setSyncState({
+        status: "同步失败",
+        detail: error?.message || "请检查 Supabase 配置",
+      });
+      if (requireCloud) throw error;
+      return normalizedNext;
+    }
   };
 
   const actor = currentUser?.username || "未知用户";
@@ -890,7 +916,7 @@ function App() {
       return { ...task, order };
     });
 
-    persist({ ...data, tasks, globalLogs: [log, ...data.globalLogs] });
+    void persist({ ...data, tasks, globalLogs: [log, ...data.globalLogs] });
   };
 
   const reorderTask = (targetId) => {
@@ -932,7 +958,7 @@ function App() {
       return { ...task, order };
     });
 
-    persist({ ...data, tasks, globalLogs: [log, ...data.globalLogs] });
+    void persist({ ...data, tasks, globalLogs: [log, ...data.globalLogs] });
     setDraggedTaskId(null);
   };
 
@@ -972,7 +998,7 @@ function App() {
       return { ...task, dashboardOrder };
     });
 
-    persist({ ...data, tasks, globalLogs: [log, ...data.globalLogs] });
+    void persist({ ...data, tasks, globalLogs: [log, ...data.globalLogs] });
   };
 
   const reorderDashboardTask = (targetId) => {
@@ -1069,7 +1095,7 @@ function App() {
           }
         : task,
     );
-    persist({ ...data, tasks, globalLogs: [log, ...data.globalLogs] });
+    await persist({ ...data, tasks, globalLogs: [log, ...data.globalLogs] }, { requireCloud: true });
   };
 
   const addAttachments = async (taskId, files, onProgress) => {
@@ -1118,7 +1144,7 @@ function App() {
           }
         : task,
     );
-    persist({ ...data, tasks, globalLogs: [log, ...data.globalLogs] });
+    await persist({ ...data, tasks, globalLogs: [log, ...data.globalLogs] }, { requireCloud: true });
   };
 
   const downloadAttachment = (attachment) => {
@@ -1187,6 +1213,11 @@ function App() {
         applyRemoteBundle(state, updatedAt, detailMsg);
       } catch (e) {
         console.warn("协作同步拉取失败:", e);
+        if (cancelled) return;
+        setSyncState({
+          status: "同步检查失败",
+          detail: e?.message || "协作数据拉取失败，稍后会自动重试",
+        });
       }
     };
 
@@ -1265,11 +1296,14 @@ function App() {
             const at = await fetchCloudUpdatedAt();
             if (!at || at === lastRemoteUpdatedAtRef.current) return;
             await pullRemoteAndMerge(`定时同步 · ${formatTime(at)}`);
-          } catch {
-            /* 轮询失败不打扰用户 */
+          } catch (error) {
+            setSyncState({
+              status: "同步检查失败",
+              detail: error?.message || "稍后会自动重试",
+            });
           }
         })();
-      }, 8000);
+      }, 3000);
 
       const onVisibility = () => {
         if (document.visibilityState === "visible") void pullRemoteAndMerge(`切回页面 · ${formatTime(new Date().toISOString())}`);
@@ -2202,6 +2236,9 @@ function TaskDetail({
               ? `已成功上传 ${fileCount} 个附件`
               : "留言已发送",
       });
+    } catch (err) {
+      console.error(err);
+      alert(err?.message || "留言或附件同步失败，请重试。");
     } finally {
       setUploadProgress(null);
       setCommentSubmitBusy(false);
@@ -2378,7 +2415,7 @@ function TaskDetail({
                   onChange={(event) => addPendingTaskFiles(event.target.files)}
                 />
               </label>
-              {!!pendingTaskFiles.length && (
+              {!!pendingTaskFiles.length && !taskUploadBusy && (
                 <div className="comment-draft-files task-pending-files">
                   {pendingTaskFiles.map((file, index) => (
                     <div key={`${file.name}-${index}-${file.size}`} className="comment-draft-file">
@@ -2391,6 +2428,11 @@ function TaskDetail({
                       </button>
                     </div>
                   ))}
+                </div>
+              )}
+              {!!pendingTaskFiles.length && taskUploadBusy && (
+                <div className="upload-sync-note">
+                  正在同步 {pendingTaskFiles.length} 个文件到云端，完成后这里会自动清空，Ares 会在几秒内看到。
                 </div>
               )}
               <div className="task-attachment-submit-row">

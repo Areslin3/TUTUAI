@@ -2181,6 +2181,18 @@ select option {
   background: rgba(8, 14, 28, 0.92);
 }
 
+.upload-sync-note {
+  margin-top: 12px;
+  padding: 11px 13px;
+  border-radius: 9px;
+  border: 1px solid rgba(59, 130, 246, 0.38);
+  background: rgba(30, 64, 175, 0.18);
+  color: #dbeafe;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.55;
+}
+
 .upload-progress-head {
   display: flex;
   align-items: center;
