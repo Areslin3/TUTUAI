@@ -2149,6 +2149,8 @@ function TaskDetail({
   const [commentSubmitBusy, setCommentSubmitBusy] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [toastPayload, setToastPayload] = useState(null);
+  const [taskUploadInputKey, setTaskUploadInputKey] = useState(0);
+  const [commentUploadInputKey, setCommentUploadInputKey] = useState(0);
   const taskFileInputRef = useRef(null);
   const [selectedLog, setSelectedLog] = useState(null);
   const [timelineQuery, setTimelineQuery] = useState("");
@@ -2160,7 +2162,8 @@ function TaskDetail({
     setCommentFiles([]);
     setToastPayload(null);
     setUploadProgress(null);
-    if (taskFileInputRef.current) taskFileInputRef.current.value = "";
+    setTaskUploadInputKey(0);
+    setCommentUploadInputKey(0);
   }, [task.id]);
 
   useEffect(() => {
@@ -2188,6 +2191,7 @@ function TaskDetail({
       await addComment(task.id, comment, commentFiles, fileCount ? (p) => setUploadProgress(p) : undefined);
       setComment("");
       setCommentFiles([]);
+      if (fileCount) setCommentUploadInputKey((k) => k + 1);
       setToastPayload({
         key: Date.now(),
         message:
@@ -2245,7 +2249,7 @@ function TaskDetail({
     try {
       await addAttachments(task.id, list, (p) => setUploadProgress(p));
       setPendingTaskFiles([]);
-      if (taskFileInputRef.current) taskFileInputRef.current.value = "";
+      setTaskUploadInputKey((k) => k + 1);
       setToastPayload({ key: Date.now(), message: `上传成功！已将 ${n} 个文件同步到任务` });
     } finally {
       setUploadProgress(null);
@@ -2353,7 +2357,13 @@ function TaskDetail({
                 <Upload size={20} />
                 <span>选择文件（可多选）</span>
                 <small>PDF、Word、Excel、图片、TXT、CSV、ZIP、视频；选好后点下方「提交上传」</small>
-                <input ref={taskFileInputRef} type="file" multiple onChange={(event) => addPendingTaskFiles(event.target.files)} />
+                <input
+                  key={`task-upload-${task.id}-${taskUploadInputKey}`}
+                  ref={taskFileInputRef}
+                  type="file"
+                  multiple
+                  onChange={(event) => addPendingTaskFiles(event.target.files)}
+                />
               </label>
               {!!pendingTaskFiles.length && (
                 <div className="comment-draft-files task-pending-files">
@@ -2433,6 +2443,7 @@ function TaskDetail({
                 <label className="ghost-btn">
                   <Upload size={16} /> 选择留言附件
                   <input
+                    key={`comment-upload-${task.id}-${commentUploadInputKey}`}
                     type="file"
                     multiple
                     className="hidden-input"
