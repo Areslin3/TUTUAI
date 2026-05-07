@@ -2129,6 +2129,7 @@ function TaskDetail({
   const [pendingTaskFiles, setPendingTaskFiles] = useState([]);
   const [taskUploadBusy, setTaskUploadBusy] = useState(false);
   const [commentSubmitBusy, setCommentSubmitBusy] = useState(false);
+  const [actionToast, setActionToast] = useState(null);
   const taskFileInputRef = useRef(null);
   const [selectedLog, setSelectedLog] = useState(null);
   const [timelineQuery, setTimelineQuery] = useState("");
@@ -2138,19 +2139,41 @@ function TaskDetail({
     setPendingTaskFiles([]);
     setComment("");
     setCommentFiles([]);
+    setActionToast(null);
     if (taskFileInputRef.current) taskFileInputRef.current.value = "";
   }, [task.id]);
+
+  useEffect(() => {
+    if (!actionToast) return;
+    const timer = window.setTimeout(() => setActionToast(null), 3200);
+    return () => window.clearTimeout(timer);
+  }, [actionToast]);
 
   const submitComment = async (event) => {
     event.preventDefault();
     const clean = comment.trim();
     if (!clean && !commentFiles.length) return;
     if (commentSubmitBusy) return;
+    const fileCount = commentFiles.length;
+    const confirmMsg =
+      clean && fileCount
+        ? "确认提交本条留言及附件？提交后将同步给所有人。"
+        : clean
+          ? "确认发送本条留言？"
+          : `确认仅上传 ${fileCount} 个附件（无文字留言）？`;
+    if (!confirm(confirmMsg)) return;
     setCommentSubmitBusy(true);
     try {
       await addComment(task.id, comment, commentFiles);
       setComment("");
       setCommentFiles([]);
+      setActionToast(
+        fileCount
+          ? clean
+            ? `留言已发送（含 ${fileCount} 个附件）`
+            : `已成功上传 ${fileCount} 个附件`
+          : "留言已发送",
+      );
     } finally {
       setCommentSubmitBusy(false);
     }
@@ -2179,11 +2202,26 @@ function TaskDetail({
 
   const submitTaskAttachments = async () => {
     if (!pendingTaskFiles.length || taskUploadBusy) return;
+    const list = pendingTaskFiles;
+    const n = list.length;
+    const namePreview = list
+      .slice(0, 4)
+      .map((f) => f.name)
+      .join("、");
+    const tail = n > 4 ? ` 等共 ${n} 个文件` : "";
+    if (
+      !confirm(
+        `确认将 ${n} 个文件上传到当前任务「${task.title}」？\n${namePreview}${tail}\n\n上传成功后将同步到云端，其他人可见。`,
+      )
+    ) {
+      return;
+    }
     setTaskUploadBusy(true);
     try {
-      await addAttachments(task.id, pendingTaskFiles);
+      await addAttachments(task.id, list);
       setPendingTaskFiles([]);
       if (taskFileInputRef.current) taskFileInputRef.current.value = "";
+      setActionToast(`上传成功！已将 ${n} 个文件同步到任务`);
     } finally {
       setTaskUploadBusy(false);
     }
@@ -2213,6 +2251,12 @@ function TaskDetail({
 
   return (
     <motion.div className="detail-page" {...cinematicMotion}>
+      {actionToast && (
+        <div className="toast-banner" role="status" aria-live="polite">
+          <CheckCircle2 size={22} strokeWidth={2.5} aria-hidden />
+          <span>{actionToast}</span>
+        </div>
+      )}
       <button className="text-btn" onClick={back}><ChevronLeft size={17} /> 返回模块</button>
       <section className="detail-head">
         <div>

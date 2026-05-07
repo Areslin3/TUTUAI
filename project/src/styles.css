@@ -2048,10 +2048,19 @@ select option {
 .info-item,
 .compact-list button,
 .attachment-item,
-.timeline-item {
+.timeline-item,
+.comment-draft-file {
   background: rgba(8, 14, 28, 0.95);
   border-color: rgba(148, 163, 184, 0.36);
   color: #f1f7ff;
+}
+
+.comment-draft-file strong {
+  color: #f8fafc;
+}
+
+.comment-draft-file small {
+  color: #94a3b8;
 }
 
 .upload-zone {
@@ -2121,6 +2130,46 @@ select option {
   --os-padding-axis: 0px;
   --os-track-border-radius: 999px;
   --os-handle-border-radius: 999px;
+}
+
+.toast-banner {
+  position: fixed;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10050;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 22px;
+  max-width: min(92vw, 440px);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.96), rgba(5, 150, 105, 0.99));
+  border: 1px solid rgba(167, 243, 208, 0.45);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  box-shadow:
+    0 22px 55px rgba(0, 0, 0, 0.55),
+    0 0 28px rgba(16, 185, 129, 0.35);
+  animation: toastSlideUp 0.38s ease both;
+  pointer-events: none;
+}
+
+.toast-banner svg {
+  flex-shrink: 0;
+}
+
+@keyframes toastSlideUp {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
 }
 
 .os-scrollbar-track {
