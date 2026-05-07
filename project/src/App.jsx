@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { OverlayScrollbarsComponent } from "overlayscrollbars-react";
 import {
   Activity,
@@ -146,6 +146,44 @@ const cinematicMotion = {
   animate: { opacity: 1, y: 0, filter: "blur(0px)" },
   transition: { type: "spring", bounce: 0, duration: 0.8 },
 };
+
+const MAX_INLINE_FILE_BYTES = 8 * 1024 * 1024;
+
+/** 顺序读取本地文件并上报 0–100 进度（用于附件入库前的 FileReader） */
+async function readFilesWithProgress(files, onProgress) {
+  const list = Array.from(files || []);
+  const n = list.length;
+  if (!n) return [];
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const file = list[i];
+    const segStart = (i / n) * 100;
+    const segW = 100 / n;
+
+    if (file.size > MAX_INLINE_FILE_BYTES) {
+      out.push({ file, dataUrl: "" });
+      onProgress?.(segStart + segW);
+      continue;
+    }
+
+    const dataUrl = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onprogress = (ev) => {
+        if (ev.lengthComputable && onProgress && ev.total > 0) {
+          const frac = ev.loaded / ev.total;
+          onProgress(segStart + frac * segW);
+        }
+      };
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => resolve("");
+      reader.readAsDataURL(file);
+    });
+    out.push({ file, dataUrl });
+    onProgress?.(segStart + segW);
+  }
+  onProgress?.(100);
+  return out;
+}
 
 const normalizeSearch = (value) => String(value || "").toLowerCase().replace(/\s+/g, "");
 const hasCoreStateShape = (state) =>
@@ -975,44 +1013,27 @@ function App() {
     setDraggedDashboardTaskId(null);
   };
 
-  const addComment = async (taskId, content, files = []) => {
+  const addComment = async (taskId, content, files = [], onProgress) => {
     const clean = content.trim();
     const pickedFiles = Array.from(files || []);
     if (!clean && !pickedFiles.length) return;
     const target = data.tasks.find((task) => task.id === taskId);
     const at = timestamp();
-    const uploads = await Promise.all(
-      pickedFiles.map(
-        (file) =>
-          new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onload = () =>
-              resolve({
-                id: makeId("comment-att"),
-                taskId,
-                name: file.name,
-                uploader: actor,
-                uploadedAt: at,
-                type: file.type || "application/octet-stream",
-                size: file.size,
-                dataUrl: file.size <= 8 * 1024 * 1024 ? reader.result : "",
-              });
-            reader.onerror = () =>
-              resolve({
-                id: makeId("comment-att"),
-                taskId,
-                name: file.name,
-                uploader: actor,
-                uploadedAt: at,
-                type: file.type || "application/octet-stream",
-                size: file.size,
-                dataUrl: "",
-              });
-            if (file.size <= 8 * 1024 * 1024) reader.readAsDataURL(file);
-            else reader.onload();
-          }),
-      ),
-    );
+    let uploads = [];
+    if (pickedFiles.length) {
+      onProgress?.(0);
+      const readResults = await readFilesWithProgress(pickedFiles, onProgress);
+      uploads = readResults.map(({ file, dataUrl }) => ({
+        id: makeId("comment-att"),
+        taskId,
+        name: file.name,
+        uploader: actor,
+        uploadedAt: at,
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        dataUrl,
+      }));
+    }
     const comment = {
       id: makeId("comment"),
       taskId,
@@ -1050,45 +1071,26 @@ function App() {
     persist({ ...data, tasks, globalLogs: [log, ...data.globalLogs] });
   };
 
-  const addAttachments = async (taskId, files) => {
+  const addAttachments = async (taskId, files, onProgress) => {
     const selectedFiles = Array.from(files || []);
     if (!selectedFiles.length) return;
 
-    const uploads = await Promise.all(
-      selectedFiles.map(
-        (file) =>
-          new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onload = () =>
-              resolve({
-                id: makeId("att"),
-                taskId,
-                name: file.name,
-                uploader: actor,
-                uploadedAt: timestamp(),
-                type: file.type || "application/octet-stream",
-                size: file.size,
-                dataUrl: file.size <= 8 * 1024 * 1024 ? reader.result : "",
-              });
-            reader.onerror = () =>
-              resolve({
-                id: makeId("att"),
-                taskId,
-                name: file.name,
-                uploader: actor,
-                uploadedAt: timestamp(),
-                type: file.type || "application/octet-stream",
-                size: file.size,
-                dataUrl: "",
-              });
-            if (file.size <= 8 * 1024 * 1024) reader.readAsDataURL(file);
-            else reader.onload();
-          }),
-      ),
-    );
+    onProgress?.(0);
+    const readResults = await readFilesWithProgress(selectedFiles, onProgress);
+    const batchAt = timestamp();
+    const uploads = readResults.map(({ file, dataUrl }) => ({
+      id: makeId("att"),
+      taskId,
+      name: file.name,
+      uploader: actor,
+      uploadedAt: batchAt,
+      type: file.type || "application/octet-stream",
+      size: file.size,
+      dataUrl,
+    }));
 
     const target = data.tasks.find((task) => task.id === taskId);
-    const at = timestamp();
+    const at = batchAt;
     const log = {
       id: makeId("log"),
       taskId,
@@ -2106,6 +2108,22 @@ function ProgressBar({ value }) {
   );
 }
 
+function InlineUploadProgress({ value }) {
+  if (value === null) return null;
+  const pct = Math.min(100, Math.round(value));
+  return (
+    <div className="upload-progress-shell" aria-busy="true">
+      <div className="upload-progress-head">
+        <span>正在读取并上传附件</span>
+        <strong>{pct}%</strong>
+      </div>
+      <div className="upload-progress-track" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+        <div className="upload-progress-fill" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function TaskDetail({
   task,
   back,
@@ -2129,7 +2147,8 @@ function TaskDetail({
   const [pendingTaskFiles, setPendingTaskFiles] = useState([]);
   const [taskUploadBusy, setTaskUploadBusy] = useState(false);
   const [commentSubmitBusy, setCommentSubmitBusy] = useState(false);
-  const [actionToast, setActionToast] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const [toastPayload, setToastPayload] = useState(null);
   const taskFileInputRef = useRef(null);
   const [selectedLog, setSelectedLog] = useState(null);
   const [timelineQuery, setTimelineQuery] = useState("");
@@ -2139,15 +2158,16 @@ function TaskDetail({
     setPendingTaskFiles([]);
     setComment("");
     setCommentFiles([]);
-    setActionToast(null);
+    setToastPayload(null);
+    setUploadProgress(null);
     if (taskFileInputRef.current) taskFileInputRef.current.value = "";
   }, [task.id]);
 
   useEffect(() => {
-    if (!actionToast) return;
-    const timer = window.setTimeout(() => setActionToast(null), 3200);
+    if (!toastPayload) return;
+    const timer = window.setTimeout(() => setToastPayload(null), 3800);
     return () => window.clearTimeout(timer);
-  }, [actionToast]);
+  }, [toastPayload]);
 
   const submitComment = async (event) => {
     event.preventDefault();
@@ -2163,18 +2183,22 @@ function TaskDetail({
           : `确认仅上传 ${fileCount} 个附件（无文字留言）？`;
     if (!confirm(confirmMsg)) return;
     setCommentSubmitBusy(true);
+    if (fileCount) setUploadProgress(0);
     try {
-      await addComment(task.id, comment, commentFiles);
+      await addComment(task.id, comment, commentFiles, fileCount ? (p) => setUploadProgress(p) : undefined);
       setComment("");
       setCommentFiles([]);
-      setActionToast(
-        fileCount
-          ? clean
+      setToastPayload({
+        key: Date.now(),
+        message:
+          fileCount && clean
             ? `留言已发送（含 ${fileCount} 个附件）`
-            : `已成功上传 ${fileCount} 个附件`
-          : "留言已发送",
-      );
+            : fileCount
+              ? `已成功上传 ${fileCount} 个附件`
+              : "留言已发送",
+      });
     } finally {
+      setUploadProgress(null);
       setCommentSubmitBusy(false);
     }
   };
@@ -2217,12 +2241,14 @@ function TaskDetail({
       return;
     }
     setTaskUploadBusy(true);
+    setUploadProgress(0);
     try {
-      await addAttachments(task.id, list);
+      await addAttachments(task.id, list, (p) => setUploadProgress(p));
       setPendingTaskFiles([]);
       if (taskFileInputRef.current) taskFileInputRef.current.value = "";
-      setActionToast(`上传成功！已将 ${n} 个文件同步到任务`);
+      setToastPayload({ key: Date.now(), message: `上传成功！已将 ${n} 个文件同步到任务` });
     } finally {
+      setUploadProgress(null);
       setTaskUploadBusy(false);
     }
   };
@@ -2251,12 +2277,23 @@ function TaskDetail({
 
   return (
     <motion.div className="detail-page" {...cinematicMotion}>
-      {actionToast && (
-        <div className="toast-banner" role="status" aria-live="polite">
-          <CheckCircle2 size={22} strokeWidth={2.5} aria-hidden />
-          <span>{actionToast}</span>
-        </div>
-      )}
+      <AnimatePresence>
+        {toastPayload && (
+          <motion.div
+            key={toastPayload.key}
+            className="toast-banner toast-banner--bubble"
+            role="status"
+            aria-live="polite"
+            initial={{ opacity: 0, y: 32, scale: 0.85, x: "-50%" }}
+            animate={{ opacity: 1, y: 0, scale: 1, x: "-50%" }}
+            exit={{ opacity: 0, y: 16, scale: 0.92, x: "-50%" }}
+            transition={{ type: "spring", stiffness: 460, damping: 28 }}
+          >
+            <CheckCircle2 size={22} strokeWidth={2.5} aria-hidden />
+            <span>{toastPayload.message}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <button className="text-btn" onClick={back}><ChevronLeft size={17} /> 返回模块</button>
       <section className="detail-head">
         <div>
@@ -2346,6 +2383,7 @@ function TaskDetail({
                   <small className="muted">待上传 {pendingTaskFiles.length} 个文件</small>
                 )}
               </div>
+              <InlineUploadProgress value={uploadProgress} />
             </>
           )}
           {inTrash && <p className="muted">回收站任务不支持上传附件。</p>}
@@ -2418,6 +2456,7 @@ function TaskDetail({
                   ))}
                 </div>
               )}
+              <InlineUploadProgress value={uploadProgress} />
               <button className="primary-btn" type="submit" disabled={commentSubmitBusy}>
                 <MessageSquareText size={17} /> {commentSubmitBusy ? "提交中…" : "提交留言与附件"}
               </button>
