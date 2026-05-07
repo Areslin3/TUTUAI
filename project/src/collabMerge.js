@@ -68,6 +68,7 @@ const idSig = (arr) =>
     .sort()
     .join("|");
 
+/** 出站保存：本地改动优先合并远端多出的附件/留言/日志 */
 const mergeTaskPayload = (localTask, remoteTask) => {
   const at = mergeAttachments(localTask.attachments || [], remoteTask.attachments || []);
   const cm = mergeComments(localTask.comments || [], remoteTask.comments || []);
@@ -83,6 +84,20 @@ const mergeTaskPayload = (localTask, remoteTask) => {
     logs: lg,
     updatedAt: maxIso(localTask.updatedAt, remoteTask.updatedAt),
     _mergeChanged: changed,
+  };
+};
+
+/** 入站拉取：远端任务主字段（标题、状态等）为准，同时并入本地尚未上传完的附件/留言/日志 */
+const mergeInboundTaskPayload = (localTask, remoteTask) => {
+  const at = mergeAttachments(localTask.attachments || [], remoteTask.attachments || []);
+  const cm = mergeComments(localTask.comments || [], remoteTask.comments || []);
+  const lg = mergeLogs(localTask.logs || [], remoteTask.logs || []);
+  return {
+    ...remoteTask,
+    attachments: at,
+    comments: cm,
+    logs: lg,
+    updatedAt: maxIso(localTask.updatedAt, remoteTask.updatedAt),
   };
 };
 
@@ -113,6 +128,26 @@ const mergeTaskList = (localTasks, remoteTasks) => {
   }
 
   return { tasks: out, changed };
+};
+
+const mergeInboundTaskList = (localTasks, remoteTasks) => {
+  const localById = byIdMap(localTasks);
+  const out = [];
+  const seen = new Set();
+
+  for (const rt of remoteTasks || []) {
+    if (!rt?.id) continue;
+    seen.add(rt.id);
+    const lt = localById.get(rt.id);
+    out.push(lt ? mergeInboundTaskPayload(lt, rt) : rt);
+  }
+
+  for (const lt of localTasks || []) {
+    if (!lt?.id || seen.has(lt.id)) continue;
+    out.push(lt);
+  }
+
+  return { tasks: out };
 };
 
 const mergeUsers = (localUsers, remoteUsers) => {
@@ -195,5 +230,32 @@ export function mergeCollaborativeState(local, remote) {
       globalLogs,
     },
     changed,
+  };
+}
+
+/**
+ * 从云端拉取后合并到当前页：每个任务以 **remote 主字段** 为准，再并上双方附件/留言/日志。
+ * 仅用于 Realtime/轮询/回页触发的入站拉取，与 mergeCollaborativeState（出站保存前）方向相反。
+ */
+export function mergeInboundCollaborativeState(prev, remote) {
+  if (!remote || !Array.isArray(remote.tasks) || !Array.isArray(prev?.tasks)) {
+    return { state: prev };
+  }
+
+  const { tasks } = mergeInboundTaskList(prev.tasks, remote.tasks);
+  const { users } = mergeUsers(prev.users || [], remote.users || []);
+  const { tasks: trash } = mergeInboundTaskList(prev.trash || [], remote.trash || []);
+  const { attachmentTrash } = mergeAttachmentTrash(prev.attachmentTrash || [], remote.attachmentTrash || []);
+  const { globalLogs } = mergeGlobalLogs(prev.globalLogs || [], remote.globalLogs || []);
+
+  return {
+    state: {
+      ...prev,
+      tasks,
+      users,
+      trash,
+      attachmentTrash,
+      globalLogs,
+    },
   };
 }

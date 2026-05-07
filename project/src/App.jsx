@@ -52,7 +52,7 @@ import {
   saveCloudState,
   subscribeAppStateRemoteChanges,
 } from "./cloudSync.js";
-import { mergeCollaborativeState } from "./collabMerge.js";
+import { mergeCollaborativeState, mergeInboundCollaborativeState } from "./collabMerge.js";
 
 const formatTime = (value) =>
   new Intl.DateTimeFormat("zh-CN", {
@@ -1152,7 +1152,7 @@ function App() {
     let pollId = null;
     let removeVisibilityAndOnline = () => {};
 
-    /** 把云端拉到的状态并入当前界面数据：远端主字段优先，本地补齐未同步的附件/留言/日志。 */
+    /** 入站拉取：每个任务以云端主字段为准，再并上本地与云端的附件/留言/日志（与出站 persist 的合并方向不同）。 */
     const applyRemoteBundle = (remoteState, updatedAt, detailMsg) => {
       if (cancelled) return;
       if (!remoteState || !hasCoreStateShape(remoteState) || isEmptyCoreState(remoteState)) return;
@@ -1160,8 +1160,8 @@ function App() {
       setData((prev) => {
         const normalizedRemote = normalizeState(remoteState);
         const beforeRevision = stateRevision(prev);
-        const { state } = mergeCollaborativeState(normalizedRemote, prev);
-        const merged = normalizeState(state);
+        const { state: mergedOnce } = mergeInboundCollaborativeState(prev, normalizedRemote);
+        const merged = normalizeState(mergedOnce);
         if (updatedAt) lastRemoteUpdatedAtRef.current = updatedAt;
         if (beforeRevision !== stateRevision(merged)) {
           saveState(merged);
@@ -1197,8 +1197,12 @@ function App() {
         const remoteAt = meta.updatedAt;
         if (hasCoreStateShape(remoteState) && !isEmptyCoreState(remoteState)) {
           const normalizedRemote = normalizeState(remoteState);
-          setData(normalizedRemote);
-          saveState(normalizedRemote);
+          setData((prev) => {
+            const { state: mergedOnce } = mergeInboundCollaborativeState(prev, normalizedRemote);
+            const merged = normalizeState(mergedOnce);
+            saveState(merged);
+            return merged;
+          });
           lastRemoteUpdatedAtRef.current = remoteAt;
           setSyncState({
             status: "云端已同步",

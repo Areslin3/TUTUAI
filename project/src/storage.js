@@ -181,7 +181,7 @@ function normalizeAttachmentTrash(items = []) {
   return cleaned.map((item) => ({
     ...item,
     deletedAt: item.deletedAt || now(),
-    uploader: item.uploader || "Ares",
+    uploader: item.uploader || "未知用户",
     sourceType: item.sourceType || "task",
   }));
 }
