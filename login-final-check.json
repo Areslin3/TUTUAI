@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "placeholders": [
+    "请输入用户名",
+    "请输入密码"
+  ],
+  "authHasDemo": false,
+  "messages": []
+}

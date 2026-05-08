@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "usersText": "用户管理\nA\nAres\nAres管理员\nActive",
+  "brandText": "兔兔及时达自动化部署",
+  "terminalText": "System initialized. Awaiting commands...\n> [RPA_SUCCESS] FBA Entry matched: YTNCHI26020101\n> [SYS_EXEC] Routing data to: \\\\Wjserver\\共享文件\\营运部\\客服部文件\\2026整柜进度表2026.04.16 Eliza专用(2)(1).xlsx\n",
+  "storedUsers": [
+    {
+      "id": "u-ares",
+      "username": "Ares",
+      "password": "123456",
+      "role": "Ares管理员"
+    }
+  ],
+  "messages": []
+}
