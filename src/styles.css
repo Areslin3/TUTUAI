@@ -1050,6 +1050,11 @@ textarea:focus {
   cursor: pointer;
 }
 
+.timeline-item.clickable:focus-visible {
+  outline: 2px solid rgba(59, 130, 246, 0.9);
+  outline-offset: 2px;
+}
+
 .timeline-item.clickable:hover {
   background: #f1f6ff;
 }

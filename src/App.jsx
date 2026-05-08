@@ -2647,11 +2647,18 @@ function TaskDetail({
           </div>
           <OverlayScrollbarsComponent className="timeline timeline-scrollable" options={TIMELINE_SCROLLBAR_OPTIONS} defer>
             {visibleTimelineLogs.map((item) => (
-              <button
+              <article
                 key={item.id}
-                type="button"
                 className="timeline-item clickable"
+                role="button"
+                tabIndex={0}
                 onClick={() => setSelectedLog(item)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setSelectedLog(item);
+                  }
+                }}
                 title="点击查看详情"
               >
                 <div className="timeline-item-head">
@@ -2675,7 +2682,7 @@ function TaskDetail({
                   {formatTime(item.time)}
                   {item.snapshot ? ` · 状态：${item.snapshot.status} · 进度：${item.snapshot.progress}%` : ""}
                 </small>
-              </button>
+              </article>
             ))}
             {!visibleTimelineLogs.length && <p className="muted">没有匹配的时间线记录</p>}
           </OverlayScrollbarsComponent>
