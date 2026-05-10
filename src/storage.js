@@ -133,6 +133,19 @@ function normalizeComments(comments = [], taskId = "") {
   }));
 }
 
+function stripSnapshotAttachmentPayloads(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return snapshot || null;
+  const strip = (attachment) => {
+    if (!attachment || typeof attachment !== "object") return attachment;
+    const { dataUrl, ...meta } = attachment;
+    return meta;
+  };
+  return {
+    ...snapshot,
+    attachments: (snapshot.attachments || []).map(strip),
+  };
+}
+
 function normalizeLogs(logs = [], task) {
   const sourceLogs = Array.isArray(logs) ? logs : [];
   const normalizedLogs = sourceLogs.map((log) => ({
@@ -142,6 +155,14 @@ function normalizeLogs(logs = [], task) {
     actor: log.actor || task.creator || "未知用户",
     action: log.action || "更新了任务",
     time: log.time || task.updatedAt || task.createdAt || now(),
+    snapshot: stripSnapshotAttachmentPayloads(log.snapshot),
+    details: log.details
+      ? {
+          ...log.details,
+          before: stripSnapshotAttachmentPayloads(log.details.before),
+          after: stripSnapshotAttachmentPayloads(log.details.after),
+        }
+      : log.details,
   }));
 
   if (!normalizedLogs.some((log) => /创建了任务/.test(String(log.action || "")))) {
@@ -167,6 +188,14 @@ function normalizeGlobalLogs(globalLogs = [], tasks = [], trash = []) {
       actor: log.actor || "未知用户",
       action: log.action || "更新了网站",
       time: log.time || now(),
+      snapshot: stripSnapshotAttachmentPayloads(log.snapshot),
+      details: log.details
+        ? {
+            ...log.details,
+            before: stripSnapshotAttachmentPayloads(log.details.before),
+            after: stripSnapshotAttachmentPayloads(log.details.after),
+          }
+        : log.details,
     };
     byId.set(normalized.id, normalized);
   };

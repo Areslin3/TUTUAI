@@ -74,7 +74,7 @@ export const saveCloudState = async (state) => {
  * @param {() => void} onChange — 收到通知后请自行 fetch 全量 state
  * @returns {() => void} 取消订阅
  */
-export const subscribeAppStateRemoteChanges = (onChange) => {
+export const subscribeAppStateRemoteChanges = (onChange, onStatus) => {
   const supabase = getClient();
   if (!supabase) return () => {};
 
@@ -92,7 +92,9 @@ export const subscribeAppStateRemoteChanges = (onChange) => {
         onChange();
       },
     )
-    .subscribe();
+    .subscribe((status) => {
+      onStatus?.(status);
+    });
 
   return () => {
     supabase.removeChannel(channel);

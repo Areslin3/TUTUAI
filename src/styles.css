@@ -1388,6 +1388,42 @@ textarea:focus {
     padding: 24px;
   }
 
+  .sidebar {
+    padding: 12px;
+  }
+
+  .sidebar-title {
+    padding: 4px 4px 10px;
+  }
+
+  .nav-section {
+    padding: 10px 4px 5px;
+  }
+
+  .sidebar-registered-block {
+    display: none;
+  }
+
+  .user-block {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+  }
+
+  .user-pill {
+    min-width: 0;
+    height: auto;
+    min-height: 42px;
+  }
+
+  .user-pill small,
+  .admin-roster-pill small {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .stat-grid {
     grid-template-columns: 1fr;
   }

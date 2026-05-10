@@ -411,6 +411,11 @@ function App() {
 
   const actor = currentUser?.username || "未知用户";
   const isAdmin = currentUser?.username === "Ares";
+  const requireAdminAction = (message = "只有管理员可以执行这个操作。") => {
+    if (isAdmin) return true;
+    alert(message);
+    return false;
+  };
   const tutorialSteps = [
     {
       title: "首页仪表盘",
@@ -499,7 +504,6 @@ function App() {
       size: att.size,
       uploader: att.uploader,
       uploadedAt: att.uploadedAt,
-      dataUrl: att.dataUrl || "",
     })),
   });
 
@@ -636,6 +640,10 @@ function App() {
 
   const openTask = (taskId) => {
     const task = data.tasks.find((item) => item.id === taskId) || (data.trash || []).find((item) => item.id === taskId);
+    if (!task) {
+      alert("这条记录关联的任务已被彻底删除，当前只保留操作日志。");
+      return;
+    }
     if (task?.module) setActiveModule(task.module);
     setSelectedTaskId(taskId);
     setActiveView("detail");
@@ -690,6 +698,7 @@ function App() {
   };
 
   const deleteTask = (taskId) => {
+    if (!requireAdminAction("只有管理员可以删除任务。")) return;
     const current = dataRef.current;
     const task = current.tasks.find((item) => item.id === taskId);
     if (!task || !confirm(`确定删除「${task.title}」吗？`)) return;
@@ -709,6 +718,7 @@ function App() {
   };
 
   const restoreTask = (taskId) => {
+    if (!requireAdminAction("只有管理员可以恢复任务。")) return;
     const current = dataRef.current;
     const trashItem = (current.trash || []).find((item) => item.id === taskId);
     if (!trashItem) return;
@@ -735,6 +745,7 @@ function App() {
   };
 
   const purgeTrashTask = (taskId) => {
+    if (!requireAdminAction("只有管理员可以彻底删除任务。")) return;
     const current = dataRef.current;
     const trashItem = (current.trash || []).find((item) => item.id === taskId);
     if (!trashItem || !confirm(`确定彻底删除「${trashItem.title}」吗？这个操作无法恢复。`)) return;
@@ -761,6 +772,7 @@ function App() {
   };
 
   const deleteTaskAttachment = (taskId, attachmentId) => {
+    if (!requireAdminAction("只有管理员可以删除任务附件。")) return;
     const current = dataRef.current;
     const task = current.tasks.find((item) => item.id === taskId);
     if (!task) return;
@@ -803,6 +815,7 @@ function App() {
   };
 
   const deleteCommentAttachment = (taskId, commentId, attachmentId) => {
+    if (!requireAdminAction("只有管理员可以删除留言附件。")) return;
     const current = dataRef.current;
     const task = current.tasks.find((item) => item.id === taskId);
     if (!task) return;
@@ -851,6 +864,7 @@ function App() {
   };
 
   const restoreAttachment = (attachmentId) => {
+    if (!requireAdminAction("只有管理员可以恢复附件。")) return;
     const current = dataRef.current;
     const item = (current.attachmentTrash || []).find((att) => att.id === attachmentId);
     if (!item) return;
@@ -906,6 +920,7 @@ function App() {
   };
 
   const purgeAttachmentTrash = (attachmentId) => {
+    if (!requireAdminAction("只有管理员可以彻底删除附件。")) return;
     const current = dataRef.current;
     const item = (current.attachmentTrash || []).find((att) => att.id === attachmentId);
     if (!item || !confirm(`确定彻底删除附件「${item.name}」吗？这个操作无法恢复。`)) return;
@@ -916,6 +931,7 @@ function App() {
   };
 
   const deleteLogEntry = (taskId, logId) => {
+    if (!requireAdminAction("只有管理员可以删除时间线记录。")) return;
     const current = dataRef.current;
     const task = current.tasks.find((item) => item.id === taskId);
     if (!task) return;
@@ -941,6 +957,7 @@ function App() {
   };
 
   const moveTask = (taskId, direction) => {
+    if (!requireAdminAction("只有管理员可以调整任务顺序。")) return;
     const current = dataRef.current;
     const moving = current.tasks.find((task) => task.id === taskId);
     if (!moving) return;
@@ -985,6 +1002,7 @@ function App() {
   };
 
   const reorderTask = (targetId) => {
+    if (!requireAdminAction("只有管理员可以调整任务顺序。")) return;
     if (!draggedTaskId || draggedTaskId === targetId) return;
     const current = dataRef.current;
     const dragged = current.tasks.find((task) => task.id === draggedTaskId);
@@ -1029,6 +1047,7 @@ function App() {
   };
 
   const moveDashboardTask = (taskId, direction) => {
+    if (!requireAdminAction("只有管理员可以调整仪表盘顺序。")) return;
     const current = dataRef.current;
     const orderedTasks = [...current.tasks].sort((a, b) => a.dashboardOrder - b.dashboardOrder);
     const currentIndex = orderedTasks.findIndex((task) => task.id === taskId);
@@ -1069,6 +1088,7 @@ function App() {
   };
 
   const reorderDashboardTask = (targetId) => {
+    if (!requireAdminAction("只有管理员可以调整仪表盘顺序。")) return;
     if (!draggedDashboardTaskId || draggedDashboardTaskId === targetId) return;
     const current = dataRef.current;
     const orderedTasks = [...current.tasks].sort((a, b) => a.dashboardOrder - b.dashboardOrder);
@@ -1352,9 +1372,19 @@ function App() {
 
       if (cancelled || !syncReadyRef.current) return;
 
-      unsubscribeRealtime = subscribeAppStateRemoteChanges(() => {
-        void pullRemoteAndMerge(`实时协作 · ${formatTime(new Date().toISOString())}`);
-      });
+      unsubscribeRealtime = subscribeAppStateRemoteChanges(
+        () => {
+          void pullRemoteAndMerge(`实时协作 · ${formatTime(new Date().toISOString())}`);
+        },
+        (status) => {
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+            setSyncState({
+              status: "轮询同步",
+              detail: "实时通知不可用，已保留 20 秒轮询同步",
+            });
+          }
+        },
+      );
 
       pollId = window.setInterval(() => {
         void (async () => {
@@ -1497,6 +1527,7 @@ function App() {
             openEdit={(task) => setTaskModal({ mode: "edit", task })}
             deleteTask={deleteTask}
             onStatusChange={handleStatusChange}
+            canManage={isAdmin}
             moveTask={moveTask}
             reorderTask={reorderTask}
             draggedTaskId={draggedTaskId}
@@ -1509,6 +1540,7 @@ function App() {
             back={() => setActiveView(selectedTaskLocation === "trash" ? "trash" : "module")}
             openEdit={(task) => setTaskModal({ mode: "edit", task })}
             deleteTask={deleteTask}
+            canManage={isAdmin}
             onStatusChange={handleStatusChange}
             addComment={addComment}
             addAttachments={addAttachments}
@@ -1923,7 +1955,7 @@ function Dashboard({
           icon={<ArrowUpDown size={18} />}
           tasks={orderedTasks}
           openTask={openTask}
-          showOrder
+          showOrder={isAdmin}
           scrollable
           moveTask={moveDashboardTask}
           reorderTask={reorderDashboardTask}
@@ -2044,6 +2076,7 @@ function ModulePage({
   openEdit,
   deleteTask,
   onStatusChange,
+  canManage = false,
   moveTask,
   reorderTask,
   draggedTaskId,
@@ -2094,6 +2127,7 @@ function ModulePage({
             openEdit={openEdit}
             deleteTask={deleteTask}
             onStatusChange={onStatusChange}
+            canManage={canManage}
             moveTask={moveTask}
             reorderTask={reorderTask}
             draggedTaskId={draggedTaskId}
@@ -2135,6 +2169,7 @@ function TaskCard({
   openEdit,
   deleteTask,
   onStatusChange,
+  canManage = false,
   moveTask,
   reorderTask,
   draggedTaskId,
@@ -2148,26 +2183,28 @@ function TaskCard({
       initial={{ opacity: 0, y: 18, filter: "blur(8px)" }}
       animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
       transition={{ type: "spring", bounce: 0, duration: 0.55 }}
-      draggable
-      onDragStart={() => setDraggedTaskId(task.id)}
-      onDragEnd={() => setDraggedTaskId(null)}
-      onDragOver={(event) => event.preventDefault()}
-      onDrop={() => reorderTask(task.id)}
+      draggable={canManage}
+      onDragStart={() => canManage && setDraggedTaskId(task.id)}
+      onDragEnd={() => canManage && setDraggedTaskId(null)}
+      onDragOver={(event) => canManage && event.preventDefault()}
+      onDrop={() => canManage && reorderTask(task.id)}
       onClick={() => openTask(task.id)}
     >
       <div className="task-card-top">
         <button className="task-title-btn" onClick={(event) => { event.stopPropagation(); openTask(task.id); }}>{task.title}</button>
-        <div className="order-controls" onClick={(event) => event.stopPropagation()}>
-          <button className="icon-btn drag-handle" type="button" title="拖动调整顺序">
-            <GripVertical size={16} />
-          </button>
-          <button className="icon-btn" type="button" onClick={() => moveTask(task.id, "up")} title="上移" disabled={isFirst}>
-            <ChevronUp size={16} />
-          </button>
-          <button className="icon-btn" type="button" onClick={() => moveTask(task.id, "down")} title="下移" disabled={isLast}>
-            <ChevronDown size={16} />
-          </button>
-        </div>
+        {canManage && (
+          <div className="order-controls" onClick={(event) => event.stopPropagation()}>
+            <button className="icon-btn drag-handle" type="button" title="拖动调整顺序">
+              <GripVertical size={16} />
+            </button>
+            <button className="icon-btn" type="button" onClick={() => moveTask(task.id, "up")} title="上移" disabled={isFirst}>
+              <ChevronUp size={16} />
+            </button>
+            <button className="icon-btn" type="button" onClick={() => moveTask(task.id, "down")} title="下移" disabled={isLast}>
+              <ChevronDown size={16} />
+            </button>
+          </div>
+        )}
       </div>
       {matchScore !== null && <span className="match-pill">匹配度 {Math.min(100, Math.round(matchScore))}</span>}
       <p>{buildLatestSituation(task)}</p>
@@ -2189,12 +2226,16 @@ function TaskCard({
         <button className="ghost-btn detail-open-btn" onClick={() => openTask(task.id)} title="查看详情">
           <Eye size={16} /> 详情
         </button>
-        <button className="icon-btn" onClick={() => openEdit(task)} title="编辑">
-          <Edit3 size={16} />
-        </button>
-        <button className="icon-btn danger" onClick={() => deleteTask(task.id)} title="删除">
-          <Trash2 size={16} />
-        </button>
+        {canManage && (
+          <>
+            <button className="icon-btn" onClick={() => openEdit(task)} title="编辑">
+              <Edit3 size={16} />
+            </button>
+            <button className="icon-btn danger" onClick={() => deleteTask(task.id)} title="删除">
+              <Trash2 size={16} />
+            </button>
+          </>
+        )}
       </div>
     </motion.article>
   );
@@ -2231,6 +2272,7 @@ function TaskDetail({
   back,
   openEdit,
   deleteTask,
+  canManage = false,
   onStatusChange,
   addComment,
   addAttachments,
@@ -2427,12 +2469,12 @@ function TaskDetail({
           <p>{task.description}</p>
         </div>
         <div className="detail-actions">
-          {!inTrash && <button className="ghost-btn" onClick={() => openEdit(task)}><Edit3 size={17} /> 编辑</button>}
-          {!inTrash && <button className="ghost-btn danger" onClick={() => deleteTask(task.id)}><Trash2 size={17} /> 删除</button>}
+          {!inTrash && canManage && <button className="ghost-btn" onClick={() => openEdit(task)}><Edit3 size={17} /> 编辑</button>}
+          {!inTrash && canManage && <button className="ghost-btn danger" onClick={() => deleteTask(task.id)}><Trash2 size={17} /> 删除</button>}
           {inTrash && (
             <>
-              <button className="ghost-btn" onClick={() => restoreTask?.(task.id)}><Save size={17} /> 恢复</button>
-              <button className="ghost-btn danger" onClick={() => purgeTrashTask?.(task.id)}><Trash2 size={17} /> 彻底删除</button>
+              {canManage && <button className="ghost-btn" onClick={() => restoreTask?.(task.id)}><Save size={17} /> 恢复</button>}
+              {canManage && <button className="ghost-btn danger" onClick={() => purgeTrashTask?.(task.id)}><Trash2 size={17} /> 彻底删除</button>}
             </>
           )}
         </div>
@@ -2530,7 +2572,7 @@ function TaskDetail({
                 <button className="icon-btn" onClick={() => previewAttachment(attachment)} title="预览"><Eye size={15} /></button>
                 <button className="icon-btn" onClick={() => openAttachment(attachment)} title="打开"><ExternalLink size={15} /></button>
                 <button className="icon-btn" onClick={() => downloadAttachment(attachment)} title="下载"><Download size={15} /></button>
-                {!inTrash && (
+                {!inTrash && canManage && (
                   <button className="icon-btn danger" onClick={() => deleteTaskAttachment?.(task.id, attachment.id)} title="删除到回收站">
                     <Trash2 size={15} />
                   </button>
@@ -2613,7 +2655,7 @@ function TaskDetail({
                         <button className="icon-btn" onClick={() => previewAttachment(attachment)} title="预览"><Eye size={14} /></button>
                         <button className="icon-btn" onClick={() => openAttachment(attachment)} title="打开"><ExternalLink size={14} /></button>
                         <button className="icon-btn" onClick={() => downloadAttachment(attachment)} title="下载"><Download size={14} /></button>
-                        {!inTrash && (
+                        {!inTrash && canManage && (
                           <button
                             className="icon-btn danger"
                             onClick={() => deleteCommentAttachment?.(task.id, item.id, attachment.id)}
@@ -2663,7 +2705,7 @@ function TaskDetail({
               >
                 <div className="timeline-item-head">
                   <strong>{isOrderAdjustAction(item.action) ? "顺序调整" : item.actor}</strong>
-                  {!inTrash && (
+                  {!inTrash && canManage && (
                     <button
                       type="button"
                       className="icon-btn danger timeline-delete-btn"
