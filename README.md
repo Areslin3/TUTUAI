@@ -3,40 +3,19 @@
 ## 数据模式
 
 - 本地模式：数据保存在浏览器 `localStorage`。
-- 云端同步模式：使用 Supabase 的 `public.app_state` 单行 JSON 数据，多人共享同一份任务、留言、附件元数据和回收站状态。
+- 云端同步模式：通过 Netlify Functions + Blobs 存储整站 JSON 状态（任务、留言、附件元数据、回收站），国内网络可正常访问，不依赖 `*.supabase.co`。
 
-前端可以使用 `.env` 覆盖 Supabase 项目配置；如果不创建 `.env`，会使用 `src/cloudSync.js` 内置的默认 Supabase 配置。
+云端 API 默认地址：`https://beautiful-basbousa-c7556d.netlify.app/.netlify/functions/app-state`
 
-## Supabase 初始化
-
-在 Supabase SQL Editor 执行完整脚本：
-
-```sql
-supabase/setup-app_state.sql
-```
-
-脚本会创建或更新：
-
-- `public.app_state` 表
-- `state` 必须是 JSON object 的约束
-- 自动维护 `updated_at` 的触发器
-- 只允许 anon 角色读写 `id = 'main'` 的 RLS 策略
-- Realtime publication
-
-更新数据库规则后，可以安全重复执行该脚本。
-
-## 环境变量
-
-复制 `.env.example` 为 `.env` 并替换自己的 Supabase 项目信息：
-
-```powershell
-Copy-Item .env.example .env
-```
+可通过 `.env` 覆盖：
 
 ```env
-VITE_SUPABASE_URL=https://your-project-id.supabase.co
-VITE_SUPABASE_ANON_KEY=your-anon-key
+VITE_CLOUD_API_URL=https://your-site.netlify.app/.netlify/functions/app-state
 ```
+
+## 历史 Supabase 配置（已弃用）
+
+旧版使用 Supabase `app_state` 表；若你仍在使用旧部署且 Supabase 可访问，可参考 `supabase/setup-app_state.sql`。当前生产环境已切换为 Netlify Blobs。
 
 ## 本地运行
 

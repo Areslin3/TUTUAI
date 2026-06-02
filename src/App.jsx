@@ -47,9 +47,12 @@ import {
   timestamp,
 } from "./storage.js";
 import {
+  ensureCloudClient,
   fetchCloudStateWithMeta,
   fetchCloudUpdatedAt,
+  getCloudTransportLabel,
   isCloudSyncEnabled,
+  normalizeCloudError,
   saveCloudState,
   subscribeAppStateRemoteChanges,
 } from "./cloudSync.js";
@@ -370,7 +373,7 @@ function App() {
       else if (remoteRowAt) lastRemoteUpdatedAtRef.current = remoteRowAt;
       setSyncState({
         status: "云端已同步",
-        detail: `最后同步：${formatTime(updatedAt || remoteRowAt || new Date().toISOString())}`,
+        detail: `最后同步：${formatTime(updatedAt || remoteRowAt || new Date().toISOString())}${getCloudTransportLabel() ? ` · ${getCloudTransportLabel()}` : ""}`,
       });
       const canApplySavedState =
         (!requireCloud && localRevisionRef.current === writeRevision) ||
@@ -401,11 +404,12 @@ function App() {
     try {
       return await queuedSave;
     } catch (error) {
+      const normalized = normalizeCloudError(error);
       setSyncState({
         status: "同步失败",
-        detail: error?.message || "请检查 Supabase 配置",
+        detail: normalized.message || "请检查 Supabase 配置",
       });
-      if (requireCloud) throw error;
+      if (requireCloud) throw normalized;
       return normalizedNext;
     }
   };
@@ -1319,10 +1323,13 @@ function App() {
     };
 
     const run = async () => {
-      setSyncState({ status: "同步中", detail: "正在从云端加载数据..." });
+      setSyncState({ status: "同步中", detail: "正在检测云端线路..." });
       const fallbackState = buildInitialState();
       let initialized = false;
       try {
+        await ensureCloudClient();
+        if (cancelled) return;
+        setSyncState({ status: "同步中", detail: "正在从云端加载数据..." });
         const meta = await fetchCloudStateWithMeta();
         if (cancelled) return;
         const remoteState = meta.state;
@@ -1334,7 +1341,7 @@ function App() {
           lastRemoteUpdatedAtRef.current = remoteAt;
           setSyncState({
             status: "云端已同步",
-            detail: `最后同步：${formatTime(new Date().toISOString())}`,
+            detail: `最后同步：${formatTime(new Date().toISOString())}${getCloudTransportLabel() ? ` · ${getCloudTransportLabel()}` : ""}`,
           });
         } else if (isEmptyCoreState(remoteState)) {
           applyLocalState(fallbackState);
@@ -1367,9 +1374,10 @@ function App() {
         initialized = true;
       } catch (error) {
         if (cancelled) return;
+        const normalized = normalizeCloudError(error);
         setSyncState({
           status: "同步失败",
-          detail: error?.message || "请检查 Supabase 表结构和密钥",
+          detail: normalized.message || "请检查 Supabase 表结构和密钥",
         });
       } finally {
         if (!cancelled) syncReadyRef.current = initialized;
@@ -1382,6 +1390,13 @@ function App() {
           void pullRemoteAndMerge(`实时协作 · ${formatTime(new Date().toISOString())}`);
         },
         (status) => {
+          if (status === "POLLING_ONLY" || status === "PROXY_POLLING") {
+            setSyncState({
+              status: "轮询同步",
+              detail: "云端已连接，20 秒自动同步最新数据",
+            });
+            return;
+          }
           if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
             setSyncState({
               status: "轮询同步",

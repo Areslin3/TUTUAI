@@ -1,121 +1,137 @@
-import { createClient } from "@supabase/supabase-js";
-
-/** 内置项目云端（Supabase anon key 本身设计为可公开，权限靠 RLS 约束） */
-const DEFAULT_SUPABASE_URL = "https://lnkvkkgwofjgszsgpetk.supabase.co";
-const DEFAULT_SUPABASE_ANON_KEY =
-  "sb_publishable_cDc-WkiRX25lyYhCqsJOBQ_Qr0HZKKa";
-
-const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL || "").trim();
-const SUPABASE_ANON_KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY || DEFAULT_SUPABASE_ANON_KEY || "").trim();
-
-const TABLE_NAME = "app_state";
-const STATE_ROW_ID = "main";
-const REQUEST_TIMEOUT_MS = 15000;
-
-let client = null;
-
-const isProbablySupabaseUrl = (value) => /^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(value);
-
-const getClient = () => {
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
-  if (!isProbablySupabaseUrl(SUPABASE_URL)) return null;
-  if (!client) {
-    client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession: false },
-      global: {
-        fetch: async (url, options = {}) => {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-          try {
-            return await fetch(url, { ...options, signal: controller.signal });
-          } finally {
-            clearTimeout(timer);
-          }
-        },
-      },
-    });
+const CLOUD_API_URL = (() => {
+  const fromEnv = (import.meta.env.VITE_CLOUD_API_URL || "").trim();
+  if (fromEnv) return fromEnv.replace(/\/$/, "");
+  if (typeof window !== "undefined") {
+    const { origin, hostname } = window.location;
+    if (hostname.endsWith(".netlify.app") || hostname === "localhost" || hostname === "127.0.0.1") {
+      return `${origin}/.netlify/functions/app-state`;
+    }
   }
-  return client;
+  return "https://beautiful-basbousa-c7556d.netlify.app/.netlify/functions/app-state";
+})();
+
+const REQUEST_TIMEOUT_MS = 25000;
+const RETRY_DELAYS_MS = [0, 1000, 2500];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isNetworkFailure = (error) => {
+  const message = String(error?.message || error || "");
+  return (
+    error?.name === "AbortError" ||
+    message.includes("Failed to fetch") ||
+    message.includes("NetworkError") ||
+    message.includes("Network request failed") ||
+    message.includes("Load failed") ||
+    message.includes("fetch failed")
+  );
 };
 
-export const isCloudSyncEnabled = () => Boolean(getClient());
-
-export const fetchCloudStateWithMeta = async () => {
-  const supabase = getClient();
-  if (!supabase) return { state: null, updatedAt: null };
-
-  const { data, error } = await supabase
-    .from(TABLE_NAME)
-    .select("state, updated_at")
-    .eq("id", STATE_ROW_ID)
-    .maybeSingle();
-
-  if (error) throw error;
-  return { state: data?.state ?? null, updatedAt: data?.updated_at ?? null };
+export const normalizeCloudError = (error) => {
+  if (!error) return new Error("云端同步失败，请稍后重试");
+  if (isNetworkFailure(error)) {
+    return new Error("无法连接云端存储，请检查网络后刷新页面重试");
+  }
+  if (error instanceof Error) return error;
+  return new Error(String(error));
 };
+
+const fetchWithTimeout = async (url, options = {}) => {
+  const controller = new AbortController();
+  const upstreamSignal = options.signal;
+  const onAbort = () => controller.abort(upstreamSignal?.reason);
+  upstreamSignal?.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error("timeout")), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    upstreamSignal?.removeEventListener("abort", onAbort);
+  }
+};
+
+const parseCloudResponse = async (response) => {
+  const text = await response.text();
+  let payload = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = { message: text };
+    }
+  }
+  if (!response.ok) {
+    throw new Error(payload?.message || payload?.error || `云端请求失败 (${response.status})`);
+  }
+  return payload || {};
+};
+
+const cloudRequest = async (path = "", options = {}) => {
+  const url = `${CLOUD_API_URL}${path}`;
+  const response = await fetchWithTimeout(url, {
+    ...options,
+    headers: {
+      Accept: "application/json",
+      ...(options.headers || {}),
+    },
+  });
+  return parseCloudResponse(response);
+};
+
+const withCloudRetry = async (operation) => {
+  let lastError = null;
+  for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
+    if (RETRY_DELAYS_MS[attempt]) await sleep(RETRY_DELAYS_MS[attempt]);
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isNetworkFailure(error) || attempt === RETRY_DELAYS_MS.length - 1) break;
+    }
+  }
+  throw normalizeCloudError(lastError);
+};
+
+export const isCloudSyncEnabled = () => Boolean(CLOUD_API_URL);
+
+export const ensureCloudClient = async () => ({ ready: true, transport: "netlify" });
+
+export const resetCloudTransport = async () => ensureCloudClient();
+
+export const getCloudTransportLabel = () => "Netlify 云端";
+
+export const fetchCloudStateWithMeta = async () =>
+  withCloudRetry(async () => {
+    const payload = await cloudRequest("", { method: "GET" });
+    return {
+      state: payload?.state ?? null,
+      updatedAt: payload?.updated_at ?? null,
+    };
+  });
 
 export const fetchCloudState = async () => {
   const { state } = await fetchCloudStateWithMeta();
   return state;
 };
 
-export const fetchCloudUpdatedAt = async () => {
-  const supabase = getClient();
-  if (!supabase) return null;
+export const fetchCloudUpdatedAt = async () =>
+  withCloudRetry(async () => {
+    const payload = await cloudRequest("", { method: "GET" });
+    return payload?.updated_at ?? null;
+  });
 
-  const { data, error } = await supabase.from(TABLE_NAME).select("updated_at").eq("id", STATE_ROW_ID).maybeSingle();
-
-  if (error) throw error;
-  return data?.updated_at ?? null;
-};
-
-export const saveCloudState = async (state) => {
-  const supabase = getClient();
-  if (!supabase) return null;
-
-  const payload = {
-    id: STATE_ROW_ID,
-    state,
-    updated_at: new Date().toISOString(),
-  };
-
-  const { data, error } = await supabase
-    .from(TABLE_NAME)
-    .upsert(payload, { onConflict: "id" })
-    .select("updated_at")
-    .maybeSingle();
-  if (error) throw error;
-  return data?.updated_at || payload.updated_at;
-};
-
-/**
- * 订阅 app_state 行变更（需在 Supabase 为 app_state 开启 Replication）。
- * @param {() => void} onChange — 收到通知后请自行 fetch 全量 state
- * @returns {() => void} 取消订阅
- */
-export const subscribeAppStateRemoteChanges = (onChange, onStatus) => {
-  const supabase = getClient();
-  if (!supabase) return () => {};
-
-  const channel = supabase
-    .channel("app_state_main_collab")
-    .on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: TABLE_NAME,
-        filter: `id=eq.${STATE_ROW_ID}`,
-      },
-      () => {
-        onChange();
-      },
-    )
-    .subscribe((status) => {
-      onStatus?.(status);
+export const saveCloudState = async (state) =>
+  withCloudRetry(async () => {
+    const payload = await cloudRequest("", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ state }),
     });
+    return payload?.updated_at || new Date().toISOString();
+  });
 
-  return () => {
-    supabase.removeChannel(channel);
-  };
+/** Netlify 云端无 Realtime，由 App 内轮询兜底。 */
+export const subscribeAppStateRemoteChanges = (_onChange, onStatus) => {
+  onStatus?.("POLLING_ONLY");
+  return () => {};
 };
