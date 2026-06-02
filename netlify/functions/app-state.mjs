@@ -38,9 +38,24 @@ const jsonResponse = (payload, status, extraHeaders = {}) =>
 
 const readCurrentEntry = async (store) => store.getWithMetadata(STATE_KEY, { type: "json" });
 
+const getRequiredToken = () => (process.env.APP_STATE_TOKEN || "").trim();
+
+const isAuthorized = (request) => {
+  const required = getRequiredToken();
+  if (!required) return true;
+  const provided = (request.headers.get("x-app-token") || request.headers.get("authorization") || "")
+    .replace(/^Bearer\s+/i, "")
+    .trim();
+  return provided === required;
+};
+
 export default async (request) => {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders() });
+  }
+
+  if (!isAuthorized(request)) {
+    return jsonResponse({ message: "Unauthorized" }, 401);
   }
 
   const incoming = new URL(request.url);

@@ -88,7 +88,13 @@ npm run deploy:all
 
 ## 安全提醒
 
-当前为内部协作工具，云端 API **无鉴权**。仅建议在可信团队使用；公网长期使用需加 Token 鉴权，并将大附件迁至对象存储。
+默认云端 API **无鉴权**。若需收紧访问：
+
+1. Netlify 环境变量：`APP_STATE_TOKEN=你的密钥`
+2. 构建时 `.env`：`VITE_CLOUD_APP_TOKEN=同一密钥`
+3. 重新 `npm run deploy:netlify` 与 `npm run deploy:pages`
+
+仍建议仅在可信团队使用；大附件应迁至对象存储。
 
 ## 历史说明
 

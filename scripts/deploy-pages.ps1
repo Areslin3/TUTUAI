@@ -8,7 +8,11 @@ npm run build
 
 Copy-Item (Join-Path $root "dist\index.html") (Join-Path $pages "index.html") -Force
 $assetsDir = Join-Path $pages "assets"
-if (-not (Test-Path $assetsDir)) { New-Item -ItemType Directory -Path $assetsDir | Out-Null }
+if (Test-Path $assetsDir) {
+  Remove-Item (Join-Path $assetsDir "*") -Recurse -Force
+} else {
+  New-Item -ItemType Directory -Path $assetsDir | Out-Null
+}
 Copy-Item (Join-Path $root "dist\assets\*") $assetsDir -Recurse -Force
 $html = Join-Path $root "dist\兔兔及时达自动化部署进度查询系统.html"
 if (Test-Path $html) { Copy-Item $html $pages -Force }

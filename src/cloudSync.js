@@ -1,3 +1,5 @@
+const CLOUD_APP_TOKEN = (import.meta.env.VITE_CLOUD_APP_TOKEN || "").trim();
+
 const CLOUD_API_URL = (() => {
   const fromEnv = (import.meta.env.VITE_CLOUD_API_URL || "").trim();
   if (fromEnv) return fromEnv.replace(/\/$/, "");
@@ -100,6 +102,10 @@ const parseCloudResponse = async (response) => {
     throw new CloudPayloadTooLargeError(payload?.actual_bytes || estimateStateBytes(payload?.state));
   }
 
+  if (response.status === 401) {
+    throw new Error("云端 API 鉴权失败，请检查 VITE_CLOUD_APP_TOKEN 是否与 Netlify APP_STATE_TOKEN 一致");
+  }
+
   if (!response.ok) {
     throw new Error(payload?.message || payload?.error || `云端请求失败 (${response.status})`);
   }
@@ -107,12 +113,16 @@ const parseCloudResponse = async (response) => {
   return payload || {};
 };
 
+const cloudAuthHeaders = () =>
+  CLOUD_APP_TOKEN ? { "X-App-Token": CLOUD_APP_TOKEN } : {};
+
 const cloudRequest = async (path = "", options = {}) => {
   const url = `${CLOUD_API_URL}${path}`;
   const response = await fetchWithTimeout(url, {
     ...options,
     headers: {
       Accept: "application/json",
+      ...cloudAuthHeaders(),
       ...(options.headers || {}),
     },
   });
