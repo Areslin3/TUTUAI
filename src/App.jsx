@@ -47,12 +47,14 @@ import {
   timestamp,
 } from "./storage.js";
 import {
+  CloudConflictError,
   ensureCloudClient,
   fetchCloudStateWithMeta,
   fetchCloudUpdatedAt,
   getCloudTransportLabel,
   isCloudSyncEnabled,
   normalizeCloudError,
+  probeCloudConnection,
   saveCloudState,
   subscribeAppStateRemoteChanges,
 } from "./cloudSync.js";
@@ -306,6 +308,7 @@ function App() {
   const persistQueueRef = useRef(Promise.resolve());
   const lastRemoteUpdatedAtRef = useRef(null);
   const syncReadyRef = useRef(false);
+  const retryCloudSyncRef = useRef(() => {});
   const applyLocalState = (nextState) => {
     const normalizedState = normalizeState(nextState);
     dataRef.current = normalizedState;
@@ -357,45 +360,71 @@ function App() {
           detail: "正在把附件写入云端...",
         });
       }
-      const { state: remote, updatedAt: remoteRowAt } = await fetchCloudStateWithMeta();
-      let toSave = normalizedNext;
-      if (remote && hasCoreStateShape(remote) && !isEmptyCoreState(remote)) {
-        const { state: merged, changed } = mergeCollaborativeState(normalizedNext, normalizeState(remote));
-        toSave = normalizeState(merged);
-        if (changed && !requireCloud && localRevisionRef.current === writeRevision) {
-          applyLocalState(toSave);
-          writeRevision = localRevisionRef.current;
-          pendingLocalRevisionRef.current = writeRevision;
-        }
-      }
-      const updatedAt = await saveCloudState(toSave);
-      if (updatedAt) lastRemoteUpdatedAtRef.current = updatedAt;
-      else if (remoteRowAt) lastRemoteUpdatedAtRef.current = remoteRowAt;
-      setSyncState({
-        status: "云端已同步",
-        detail: `最后同步：${formatTime(updatedAt || remoteRowAt || new Date().toISOString())}${getCloudTransportLabel() ? ` · ${getCloudTransportLabel()}` : ""}`,
-      });
-      const canApplySavedState =
-        (!requireCloud && localRevisionRef.current === writeRevision) ||
-        (requireCloud && localRevisionRef.current === revisionAtStart);
-      if (canApplySavedState) {
-        if (stateRevision(dataRef.current) !== stateRevision(toSave)) {
-          applyLocalState(toSave);
-        }
-        if (!requireCloud && pendingLocalRevisionRef.current === writeRevision) {
+
+      const finishSavedState = (toSave, updatedAt, remoteRowAt) => {
+        if (updatedAt) lastRemoteUpdatedAtRef.current = updatedAt;
+        else if (remoteRowAt) lastRemoteUpdatedAtRef.current = remoteRowAt;
+        setSyncState({
+          status: "云端已同步",
+          detail: `最后同步：${formatTime(updatedAt || remoteRowAt || new Date().toISOString())}${getCloudTransportLabel() ? ` · ${getCloudTransportLabel()}` : ""}`,
+        });
+        const canApplySavedState =
+          (!requireCloud && localRevisionRef.current === writeRevision) ||
+          (requireCloud && localRevisionRef.current === revisionAtStart);
+        if (canApplySavedState) {
+          if (stateRevision(dataRef.current) !== stateRevision(toSave)) {
+            applyLocalState(toSave);
+          }
+          if (!requireCloud && pendingLocalRevisionRef.current === writeRevision) {
+            pendingLocalRevisionRef.current = 0;
+          }
+        } else if (requireCloud) {
+          const { state: mergedSavedState } = mergeCollaborativeState(dataRef.current, toSave);
+          const merged = normalizeState(mergedSavedState);
+          if (stateRevision(dataRef.current) !== stateRevision(merged)) {
+            applyLocalState(merged);
+            if (pendingLocalRevisionRef.current > 0) pendingLocalRevisionRef.current = localRevisionRef.current;
+          }
+        } else if (!requireCloud && stateRevision(dataRef.current) === stateRevision(toSave)) {
           pendingLocalRevisionRef.current = 0;
         }
-      } else if (requireCloud) {
-        const { state: mergedSavedState } = mergeCollaborativeState(dataRef.current, toSave);
-        const merged = normalizeState(mergedSavedState);
-        if (stateRevision(dataRef.current) !== stateRevision(merged)) {
-          applyLocalState(merged);
-          if (pendingLocalRevisionRef.current > 0) pendingLocalRevisionRef.current = localRevisionRef.current;
+        return toSave;
+      };
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const localForMerge = attempt === 0 ? normalizedNext : dataRef.current;
+        const { state: remote, updatedAt: remoteRowAt } = await fetchCloudStateWithMeta();
+        let toSave = localForMerge;
+        if (remote && hasCoreStateShape(remote) && !isEmptyCoreState(remote)) {
+          const { state: merged, changed } = mergeCollaborativeState(localForMerge, normalizeState(remote));
+          toSave = normalizeState(merged);
+          if (changed && !requireCloud && localRevisionRef.current === writeRevision) {
+            applyLocalState(toSave);
+            writeRevision = localRevisionRef.current;
+            pendingLocalRevisionRef.current = writeRevision;
+          }
+        } else {
+          toSave = normalizeState(localForMerge);
         }
-      } else if (!requireCloud && stateRevision(dataRef.current) === stateRevision(toSave)) {
-        pendingLocalRevisionRef.current = 0;
+
+        try {
+          const updatedAt = await saveCloudState(toSave, { expectedUpdatedAt: remoteRowAt });
+          return finishSavedState(toSave, updatedAt, remoteRowAt);
+        } catch (error) {
+          if (error instanceof CloudConflictError && attempt < 4) {
+            if (error.state && hasCoreStateShape(error.state) && !isEmptyCoreState(error.state)) {
+              const { state: mergedOnce } = mergeCollaborativeState(dataRef.current, normalizeState(error.state));
+              applyLocalState(normalizeState(mergedOnce));
+              if (pendingLocalRevisionRef.current > 0) pendingLocalRevisionRef.current = localRevisionRef.current;
+            }
+            if (error.updatedAt) lastRemoteUpdatedAtRef.current = error.updatedAt;
+            continue;
+          }
+          throw error;
+        }
       }
-      return toSave;
+
+      throw new Error("云端写入冲突重试次数已用尽，请刷新页面后再试");
     };
 
     const queuedSave = persistQueueRef.current.then(saveJob, saveJob);
@@ -407,7 +436,7 @@ function App() {
       const normalized = normalizeCloudError(error);
       setSyncState({
         status: "同步失败",
-        detail: normalized.message || "请检查 Supabase 配置",
+        detail: normalized.message || "请检查网络连接",
       });
       if (requireCloud) throw normalized;
       return normalizedNext;
@@ -1278,7 +1307,16 @@ function App() {
     let cancelled = false;
     let unsubscribeRealtime = () => {};
     let pollId = null;
+    let retryId = null;
     let removeVisibilityAndOnline = () => {};
+
+    const formatSyncDetail = (detailMsg) =>
+      `${detailMsg}${getCloudTransportLabel() ? ` · ${getCloudTransportLabel()}` : ""}`;
+
+    const flushPendingCloudWrites = () => {
+      if (pendingLocalRevisionRef.current <= 0) return;
+      void persist((current) => current);
+    };
 
     /** 入站拉取：每个任务以云端主字段为准，再并上本地与云端的附件/留言/日志（与出站 persist 的合并方向不同）。 */
     const applyRemoteBundle = (remoteState, updatedAt, detailMsg) => {
@@ -1302,7 +1340,7 @@ function App() {
 
       setSyncState({
         status: "云端已同步",
-        detail: detailMsg,
+        detail: formatSyncDetail(detailMsg),
       });
     };
 
@@ -1315,19 +1353,56 @@ function App() {
       } catch (e) {
         console.warn("协作同步拉取失败:", e);
         if (cancelled) return;
+        const normalized = normalizeCloudError(e);
         setSyncState({
           status: "同步检查失败",
-          detail: e?.message || "协作数据拉取失败，稍后会自动重试",
+          detail: normalized.message || "协作数据拉取失败，稍后会自动重试",
         });
       }
     };
 
+    const startBackgroundSync = () => {
+      if (pollId != null) return;
+
+      unsubscribeRealtime = subscribeAppStateRemoteChanges(
+        () => {
+          void pullRemoteAndMerge(`实时协作 · ${formatTime(new Date().toISOString())}`);
+        },
+        (status) => {
+          if (status === "POLLING_ONLY" || status === "PROXY_POLLING") {
+            setSyncState({
+              status: "轮询同步",
+              detail: formatSyncDetail("云端已连接，12 秒自动同步最新数据"),
+            });
+          }
+        },
+      );
+
+      pollId = window.setInterval(() => {
+        void (async () => {
+          if (cancelled) return;
+          try {
+            const at = await fetchCloudUpdatedAt();
+            if (!at || at === lastRemoteUpdatedAtRef.current) return;
+            await pullRemoteAndMerge(`定时同步 · ${formatTime(at)}`);
+          } catch (error) {
+            const normalized = normalizeCloudError(error);
+            setSyncState({
+              status: "同步检查失败",
+              detail: normalized.message || "稍后会自动重试",
+            });
+          }
+        })();
+      }, 12000);
+    };
+
     const run = async () => {
-      setSyncState({ status: "同步中", detail: "正在检测云端线路..." });
+      setSyncState({ status: "同步中", detail: "正在连接云端..." });
       const fallbackState = buildInitialState();
       let initialized = false;
       try {
         await ensureCloudClient();
+        await probeCloudConnection();
         if (cancelled) return;
         setSyncState({ status: "同步中", detail: "正在从云端加载数据..." });
         const meta = await fetchCloudStateWithMeta();
@@ -1341,11 +1416,11 @@ function App() {
           lastRemoteUpdatedAtRef.current = remoteAt;
           setSyncState({
             status: "云端已同步",
-            detail: `最后同步：${formatTime(new Date().toISOString())}${getCloudTransportLabel() ? ` · ${getCloudTransportLabel()}` : ""}`,
+            detail: formatSyncDetail(`最后同步：${formatTime(remoteAt || new Date().toISOString())}`),
           });
         } else if (isEmptyCoreState(remoteState)) {
           applyLocalState(fallbackState);
-          const at = await saveCloudState(fallbackState);
+          const at = await saveCloudState(fallbackState, { expectedUpdatedAt: remoteAt });
           if (cancelled) return;
           lastRemoteUpdatedAtRef.current = at || lastRemoteUpdatedAtRef.current;
           setSyncState({
@@ -1354,7 +1429,7 @@ function App() {
           });
         } else if (remoteState) {
           applyLocalState(fallbackState);
-          const at = await saveCloudState(fallbackState);
+          const at = await saveCloudState(fallbackState, { expectedUpdatedAt: remoteAt });
           if (cancelled) return;
           lastRemoteUpdatedAtRef.current = at || lastRemoteUpdatedAtRef.current;
           setSyncState({
@@ -1377,7 +1452,7 @@ function App() {
         const normalized = normalizeCloudError(error);
         setSyncState({
           status: "同步失败",
-          detail: normalized.message || "请检查 Supabase 表结构和密钥",
+          detail: normalized.message || "请检查网络连接",
         });
       } finally {
         if (!cancelled) syncReadyRef.current = initialized;
@@ -1385,55 +1460,37 @@ function App() {
 
       if (cancelled || !syncReadyRef.current) return;
 
-      unsubscribeRealtime = subscribeAppStateRemoteChanges(
-        () => {
-          void pullRemoteAndMerge(`实时协作 · ${formatTime(new Date().toISOString())}`);
-        },
-        (status) => {
-          if (status === "POLLING_ONLY" || status === "PROXY_POLLING") {
-            setSyncState({
-              status: "轮询同步",
-              detail: "云端已连接，20 秒自动同步最新数据",
-            });
-            return;
-          }
-          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-            setSyncState({
-              status: "轮询同步",
-              detail: "实时通知不可用，已保留 20 秒轮询同步",
-            });
-          }
-        },
-      );
+      flushPendingCloudWrites();
+      startBackgroundSync();
+    };
 
-      pollId = window.setInterval(() => {
-        void (async () => {
-          if (cancelled) return;
-          try {
-            const at = await fetchCloudUpdatedAt();
-            if (!at || at === lastRemoteUpdatedAtRef.current) return;
-            await pullRemoteAndMerge(`定时同步 · ${formatTime(at)}`);
-          } catch (error) {
-            setSyncState({
-              status: "同步检查失败",
-              detail: error?.message || "稍后会自动重试",
-            });
-          }
-        })();
-      }, 20000);
+    retryId = window.setInterval(() => {
+      if (cancelled || syncReadyRef.current) return;
+      void run();
+    }, 15000);
 
-      const onVisibility = () => {
-        if (document.visibilityState === "visible") void pullRemoteAndMerge(`切回页面 · ${formatTime(new Date().toISOString())}`);
-      };
-      const onOnline = () => {
-        void pullRemoteAndMerge(`网络恢复 · ${formatTime(new Date().toISOString())}`);
-      };
-      document.addEventListener("visibilitychange", onVisibility);
-      window.addEventListener("online", onOnline);
-      removeVisibilityAndOnline = () => {
-        document.removeEventListener("visibilitychange", onVisibility);
-        window.removeEventListener("online", onOnline);
-      };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void pullRemoteAndMerge(`切回页面 · ${formatTime(new Date().toISOString())}`);
+      }
+    };
+    const onOnline = () => {
+      if (!syncReadyRef.current) {
+        void run();
+        return;
+      }
+      void pullRemoteAndMerge(`网络恢复 · ${formatTime(new Date().toISOString())}`);
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online", onOnline);
+    removeVisibilityAndOnline = () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", onOnline);
+    };
+
+    retryCloudSyncRef.current = () => {
+      syncReadyRef.current = false;
+      void run();
     };
 
     void run();
@@ -1442,6 +1499,7 @@ function App() {
       removeVisibilityAndOnline();
       unsubscribeRealtime();
       if (pollId != null) window.clearInterval(pollId);
+      if (retryId != null) window.clearInterval(retryId);
     };
   }, []);
 
@@ -1501,6 +1559,7 @@ function App() {
           isAdmin={isAdmin}
           onLogout={logout}
           syncState={syncState}
+          onRetrySync={() => retryCloudSyncRef.current?.()}
           registeredUsernames={isAdmin ? data.users.map((u) => u.username) : []}
         />
         {activeView === "dashboard" && (
@@ -1720,9 +1779,10 @@ function Sidebar({ activeView, activeModule, openDashboard, openActivity, openMo
   );
 }
 
-function Header({ user, isAdmin, onLogout, syncState, registeredUsernames = [] }) {
+function Header({ user, isAdmin, onLogout, syncState, onRetrySync, registeredUsernames = [] }) {
   const rosterTitle =
     isAdmin && registeredUsernames.length > 0 ? `已注册：${registeredUsernames.join("、")}` : "";
+  const syncFailed = syncState.status === "同步失败" || syncState.status === "同步检查失败";
 
   return (
     <header className="topbar">
@@ -1731,10 +1791,15 @@ function Header({ user, isAdmin, onLogout, syncState, registeredUsernames = [] }
         <h2>兔兔及时达自动化部署进度查询系统</h2>
       </div>
       <div className="user-block">
-        <div className="user-pill" title={syncState.detail}>
+        <div className={`user-pill${syncFailed ? " user-pill-sync-failed" : ""}`} title={syncState.detail}>
           <Activity size={17} />
           <span>{syncState.status}</span>
           <small>{syncState.detail}</small>
+          {syncFailed && onRetrySync && (
+            <button type="button" className="sync-retry-btn" onClick={onRetrySync}>
+              重试
+            </button>
+          )}
         </div>
         {isAdmin && registeredUsernames.length > 0 && (
           <div className="user-pill admin-roster-pill" title={rosterTitle}>

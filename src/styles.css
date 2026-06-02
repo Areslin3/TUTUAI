@@ -375,6 +375,28 @@ textarea:focus {
   font-weight: 700;
 }
 
+.user-pill-sync-failed {
+  border-color: #f5c2c7;
+  background: #fff5f5;
+}
+
+.sync-retry-btn {
+  margin-left: 4px;
+  padding: 4px 10px;
+  border: 1px solid #dc3545;
+  border-radius: 999px;
+  background: #fff;
+  color: #dc3545;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.sync-retry-btn:hover {
+  background: #dc3545;
+  color: #fff;
+}
+
 .admin-roster-pill {
   max-width: min(360px, 46vw);
 }

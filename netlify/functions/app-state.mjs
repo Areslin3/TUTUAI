@@ -2,11 +2,12 @@ import { getStore } from "@netlify/blobs";
 
 const STATE_KEY = "main";
 const PATH_PREFIXES = ["/.netlify/functions/app-state", "/api/app-state"];
+const MAX_STATE_BYTES = 5.5 * 1024 * 1024;
 
 const corsHeaders = () => ({
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "content-type, authorization, x-app-token",
-  "Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "content-type, authorization, x-app-token, if-updated-at",
+  "Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS, HEAD",
   "Access-Control-Expose-Headers": "x-updated-at",
 });
 
@@ -25,6 +26,18 @@ const getStateStore = () =>
     consistency: "strong",
   });
 
+const jsonResponse = (payload, status, extraHeaders = {}) =>
+  new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      ...corsHeaders(),
+      "Content-Type": "application/json",
+      ...extraHeaders,
+    },
+  });
+
+const readCurrentEntry = async (store) => store.getWithMetadata(STATE_KEY, { type: "json" });
+
 export default async (request) => {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders() });
@@ -33,72 +46,92 @@ export default async (request) => {
   const incoming = new URL(request.url);
   const path = stripPrefix(incoming.pathname);
   if (path !== "/" && path !== "") {
-    return new Response(JSON.stringify({ message: "Not found" }), {
-      status: 404,
-      headers: { ...corsHeaders(), "Content-Type": "application/json" },
-    });
+    return jsonResponse({ message: "Not found" }, 404);
   }
 
   const store = getStateStore();
 
   try {
-    if (request.method === "GET") {
-      const entry = await store.getWithMetadata(STATE_KEY, { type: "json" });
+    if (request.method === "GET" || request.method === "HEAD") {
+      const entry = await readCurrentEntry(store);
       const updatedAt = entry?.metadata?.updated_at || null;
-      return new Response(
-        JSON.stringify({
-          state: entry?.data ?? null,
-          updated_at: updatedAt,
-        }),
-        {
+      const metaOnly = incoming.searchParams.get("meta") === "1";
+
+      if (request.method === "HEAD") {
+        return new Response(null, {
           status: 200,
           headers: {
             ...corsHeaders(),
-            "Content-Type": "application/json",
             ...(updatedAt ? { "x-updated-at": updatedAt } : {}),
           },
-        },
+        });
+      }
+
+      if (metaOnly) {
+        return jsonResponse(
+          { updated_at: updatedAt, has_state: Boolean(entry?.data) },
+          200,
+          updatedAt ? { "x-updated-at": updatedAt } : {},
+        );
+      }
+
+      return jsonResponse(
+        { state: entry?.data ?? null, updated_at: updatedAt },
+        200,
+        updatedAt ? { "x-updated-at": updatedAt } : {},
       );
     }
 
     if (request.method === "PUT" || request.method === "POST") {
+      const rawBody = await request.text();
+      if (rawBody.length > MAX_STATE_BYTES) {
+        return jsonResponse(
+          {
+            message: "State payload too large",
+            max_bytes: MAX_STATE_BYTES,
+            actual_bytes: rawBody.length,
+          },
+          413,
+        );
+      }
+
       let body;
       try {
-        body = await request.json();
+        body = rawBody ? JSON.parse(rawBody) : null;
       } catch {
-        return new Response(JSON.stringify({ message: "Invalid JSON body" }), {
-          status: 400,
-          headers: { ...corsHeaders(), "Content-Type": "application/json" },
-        });
+        return jsonResponse({ message: "Invalid JSON body" }, 400);
       }
 
       if (!body || typeof body.state !== "object" || Array.isArray(body.state)) {
-        return new Response(JSON.stringify({ message: "Body must include state object" }), {
-          status: 400,
-          headers: { ...corsHeaders(), "Content-Type": "application/json" },
-        });
+        return jsonResponse({ message: "Body must include state object" }, 400);
+      }
+
+      const expectedUpdatedAt =
+        (body.expected_updated_at || request.headers.get("if-updated-at") || "").trim() || null;
+      const current = await readCurrentEntry(store);
+      const currentUpdatedAt = current?.metadata?.updated_at || null;
+
+      if (expectedUpdatedAt && currentUpdatedAt && expectedUpdatedAt !== currentUpdatedAt) {
+        return jsonResponse(
+          {
+            message: "Cloud state was updated by another session",
+            updated_at: currentUpdatedAt,
+            state: current?.data ?? null,
+          },
+          409,
+        );
       }
 
       const updatedAt = new Date().toISOString();
       await store.setJSON(STATE_KEY, body.state, { metadata: { updated_at: updatedAt } });
-      return new Response(JSON.stringify({ updated_at: updatedAt }), {
-        status: 200,
-        headers: {
-          ...corsHeaders(),
-          "Content-Type": "application/json",
-          "x-updated-at": updatedAt,
-        },
-      });
+      return jsonResponse({ updated_at: updatedAt }, 200, { "x-updated-at": updatedAt });
     }
 
-    return new Response(JSON.stringify({ message: "Method not allowed" }), {
-      status: 405,
-      headers: { ...corsHeaders(), "Content-Type": "application/json" },
-    });
+    return jsonResponse({ message: "Method not allowed" }, 405);
   } catch (error) {
-    return new Response(
-      JSON.stringify({ message: "Cloud state storage error", error: error?.message || "unknown" }),
-      { status: 500, headers: { ...corsHeaders(), "Content-Type": "application/json" } },
+    return jsonResponse(
+      { message: "Cloud state storage error", error: error?.message || "unknown" },
+      500,
     );
   }
 };
