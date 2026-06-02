@@ -48,11 +48,14 @@ import {
 } from "./storage.js";
 import {
   CloudConflictError,
+  CloudPayloadTooLargeError,
   ensureCloudClient,
+  estimateStateBytes,
   fetchCloudStateWithMeta,
   fetchCloudUpdatedAt,
   getCloudTransportLabel,
   isCloudSyncEnabled,
+  MAX_CLOUD_STATE_BYTES,
   normalizeCloudError,
   probeCloudConnection,
   saveCloudState,
@@ -154,20 +157,42 @@ const cinematicMotion = {
 };
 
 const MAX_INLINE_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_INLINE_FILE_MB = 8;
+const MAX_CLOUD_STATE_MB = Math.round((MAX_CLOUD_STATE_BYTES / 1024 / 1024) * 10) / 10;
+
+const formatBytes = (bytes) => {
+  if (!bytes || bytes < 1024) return `${bytes || 0} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+};
+
+const assertCloudWritableState = (state, { requirePayload = false } = {}) => {
+  const bytes = estimateStateBytes(state);
+  if (bytes > MAX_CLOUD_STATE_BYTES) {
+    throw new CloudPayloadTooLargeError(bytes);
+  }
+  if (requirePayload && bytes > MAX_CLOUD_STATE_BYTES * 0.92) {
+    throw new Error(
+      `云端数据已接近上限（约 ${formatBytes(bytes)} / ${MAX_CLOUD_STATE_MB}MB），请先删除部分旧附件后再上传，否则无法同步给他人。`,
+    );
+  }
+  return bytes;
+};
 
 /** 顺序读取本地文件并上报 0–100 进度（用于附件入库前的 FileReader） */
 async function readFilesWithProgress(files, onProgress) {
   const list = Array.from(files || []);
   const n = list.length;
-  if (!n) return [];
+  if (!n) return { results: [], skippedLarge: [] };
   const out = [];
+  const skippedLarge = [];
   for (let i = 0; i < n; i++) {
     const file = list[i];
     const segStart = (i / n) * 100;
     const segW = 100 / n;
 
     if (file.size > MAX_INLINE_FILE_BYTES) {
-      out.push({ file, dataUrl: "" });
+      skippedLarge.push(file);
       onProgress?.(segStart + segW);
       continue;
     }
@@ -188,7 +213,7 @@ async function readFilesWithProgress(files, onProgress) {
     onProgress?.(segStart + segW);
   }
   onProgress?.(100);
-  return out;
+  return { results: out, skippedLarge };
 }
 
 const normalizeSearch = (value) => String(value || "").toLowerCase().replace(/\s+/g, "");
@@ -301,6 +326,10 @@ function App() {
   const [syncState, setSyncState] = useState(() =>
     cloudSyncEnabled ? { status: "初始化中", detail: "准备连接云端..." } : { status: "本地模式", detail: "未配置云端同步" },
   );
+  const cloudUploadReady = useMemo(() => {
+    if (!cloudSyncEnabled) return false;
+    return !["同步失败", "同步检查失败", "初始化中", "本地保存失败"].includes(syncState.status);
+  }, [cloudSyncEnabled, syncState.status]);
   const [authMode, setAuthMode] = useState("login");
   const [authError, setAuthError] = useState("");
   const [activeView, setActiveView] = useState("dashboard");
@@ -321,6 +350,7 @@ function App() {
   const lastRemoteUpdatedAtRef = useRef(null);
   const syncReadyRef = useRef(false);
   const retryCloudSyncRef = useRef(() => {});
+  const pullRemoteAfterSaveRef = useRef(() => {});
   const applyLocalState = (nextState) => {
     const normalizedState = normalizeState(nextState);
     dataRef.current = normalizedState;
@@ -417,7 +447,9 @@ function App() {
 
         try {
           const updatedAt = await saveCloudState(toSave, { expectedUpdatedAt: remoteRowAt });
-          return finishSavedState(toSave, updatedAt, remoteRowAt);
+          const saved = finishSavedState(toSave, updatedAt, remoteRowAt);
+          if (requireCloud) pullRemoteAfterSaveRef.current?.();
+          return saved;
         } catch (error) {
           if (error instanceof CloudConflictError && attempt < 4) {
             if (error.state && hasCoreStateShape(error.state) && !isEmptyCoreState(error.state)) {
@@ -1188,7 +1220,18 @@ function App() {
     let uploads = [];
     if (pickedFiles.length) {
       onProgress?.(0);
-      const readResults = await readFilesWithProgress(pickedFiles, onProgress);
+      const { results: readResults, skippedLarge } = await readFilesWithProgress(pickedFiles, onProgress);
+      if (skippedLarge.length && !readResults.length && !clean) {
+        throw new Error(
+          `所选文件均超过 ${MAX_INLINE_FILE_MB}MB，无法写入云端。请压缩后重试，或拆成多个小文件。`,
+        );
+      }
+      if (skippedLarge.length) {
+        const names = skippedLarge.map((f) => f.name).join("、");
+        alert(
+          `以下文件超过 ${MAX_INLINE_FILE_MB}MB，仅会保存文件名，其他人无法下载内容：\n${names}\n\n建议压缩后再上传。`,
+        );
+      }
       uploads = readResults.map(({ file, dataUrl }) => ({
         id: makeId("comment-att"),
         taskId,
@@ -1236,7 +1279,9 @@ function App() {
           }
         : task,
     );
-    await persist({ ...current, tasks, globalLogs: [log, ...current.globalLogs] }, { requireCloud: true });
+    const nextState = { ...current, tasks, globalLogs: [log, ...current.globalLogs] };
+    assertCloudWritableState(nextState, { requirePayload: uploads.length > 0 });
+    await persist(nextState, { requireCloud: true });
   };
 
   const addAttachments = async (taskId, files, onProgress) => {
@@ -1244,7 +1289,20 @@ function App() {
     if (!selectedFiles.length) return;
 
     onProgress?.(0);
-    const readResults = await readFilesWithProgress(selectedFiles, onProgress);
+    const { results: readResults, skippedLarge } = await readFilesWithProgress(selectedFiles, onProgress);
+    if (!readResults.length) {
+      throw new Error(
+        skippedLarge.length
+          ? `所选文件均超过 ${MAX_INLINE_FILE_MB}MB，无法同步到云端。请压缩后重试。`
+          : "未能读取所选文件，请重试。",
+      );
+    }
+    if (skippedLarge.length) {
+      const names = skippedLarge.map((f) => f.name).join("、");
+      alert(
+        `以下文件超过 ${MAX_INLINE_FILE_MB}MB，仅会保存文件名，其他人无法下载内容：\n${names}\n\n建议压缩后再上传。`,
+      );
+    }
     const batchAt = timestamp();
     const uploads = readResults.map(({ file, dataUrl }) => ({
       id: makeId("att"),
@@ -1286,7 +1344,10 @@ function App() {
           }
         : task,
     );
-    await persist({ ...current, tasks, globalLogs: [log, ...current.globalLogs] }, { requireCloud: true });
+    const nextState = { ...current, tasks, globalLogs: [log, ...current.globalLogs] };
+    assertCloudWritableState(nextState, { requirePayload: true });
+    await persist(nextState, { requireCloud: true });
+    return { uploadedCount: uploads.length, skippedLargeCount: skippedLarge.length };
   };
 
   const downloadAttachment = (attachment) => {
@@ -1511,6 +1572,9 @@ function App() {
       syncReadyRef.current = false;
       void run();
     };
+    pullRemoteAfterSaveRef.current = () => {
+      void pullRemoteAndMerge(`上传后校验 · ${formatTime(new Date().toISOString())}`);
+    };
 
     void run();
     return () => {
@@ -1651,6 +1715,11 @@ function App() {
             deleteLogEntry={deleteLogEntry}
             deleteTaskAttachment={deleteTaskAttachment}
             deleteCommentAttachment={deleteCommentAttachment}
+            cloudSyncEnabled={cloudSyncEnabled}
+            cloudUploadReady={cloudUploadReady}
+            cloudSyncFailed={
+              syncState.status === "同步失败" || syncState.status === "同步检查失败"
+            }
           />
         )}
       </main>
@@ -2389,6 +2458,9 @@ function TaskDetail({
   deleteLogEntry,
   deleteTaskAttachment,
   deleteCommentAttachment,
+  cloudSyncEnabled = true,
+  cloudUploadReady = true,
+  cloudSyncFailed = false,
 }) {
   const [comment, setComment] = useState("");
   const [commentFiles, setCommentFiles] = useState([]);
@@ -2420,11 +2492,22 @@ function TaskDetail({
     return () => window.clearTimeout(timer);
   }, [toastPayload]);
 
+  const uploadBlocked = cloudSyncEnabled && !cloudUploadReady;
+  const uploadBlockReason = !cloudSyncEnabled
+    ? "当前未连接云端，附件仅会保存在本机，其他人看不到。"
+    : cloudSyncFailed
+      ? "云端同步失败。请先点页面右上角「重试」，待显示「云端已同步」后再上传。"
+      : "云端正在连接，请稍候右上角显示「云端已同步」后再上传。";
+
   const submitComment = async (event) => {
     event.preventDefault();
     const clean = comment.trim();
     if (!clean && !commentFiles.length) return;
     if (commentSubmitBusy) return;
+    if (uploadBlocked) {
+      alert(uploadBlockReason);
+      return;
+    }
     const fileCount = commentFiles.length;
     const confirmMsg =
       clean && fileCount
@@ -2444,14 +2527,19 @@ function TaskDetail({
         key: Date.now(),
         message:
           fileCount && clean
-            ? `留言已发送（含 ${fileCount} 个附件）`
+            ? `留言已发送（含 ${fileCount} 个附件），他人约 12 秒内可见。`
             : fileCount
-              ? `已成功上传 ${fileCount} 个附件`
-              : "留言已发送",
+              ? `已成功上传 ${fileCount} 个附件，他人约 12 秒内可见。`
+              : "留言已发送，他人约 12 秒内可见。",
       });
     } catch (err) {
       console.error(err);
-      alert(err?.message || "留言或附件同步失败，请重试。");
+      const msg = err?.message || "留言或附件同步失败，请重试。";
+      alert(
+        cloudSyncFailed
+          ? `${msg}\n\n当前云端未就绪，请先点右上角「重试」，待显示「云端已同步」后再提交。`
+          : msg,
+      );
     } finally {
       setUploadProgress(null);
       setCommentSubmitBusy(false);
@@ -2481,6 +2569,10 @@ function TaskDetail({
 
   const submitTaskAttachments = async () => {
     if (!pendingTaskFiles.length || taskUploadBusy) return;
+    if (uploadBlocked) {
+      alert(uploadBlockReason);
+      return;
+    }
     const list = [...pendingTaskFiles];
     const n = list.length;
     const namePreview = list
@@ -2498,10 +2590,24 @@ function TaskDetail({
     setTaskUploadBusy(true);
     setUploadProgress(0);
     try {
-      await addAttachments(task.id, list, (p) => setUploadProgress(p));
+      const result = await addAttachments(task.id, list, (p) => setUploadProgress(p));
+      const skipped = result?.skippedLargeCount || 0;
+      const synced = result?.uploadedCount ?? n;
+      setToastPayload({
+        key: Date.now(),
+        message:
+          skipped > 0
+            ? `已同步 ${synced} 个文件到云端；${skipped} 个超大文件仅保留名称。他人约 12 秒内可见。`
+            : `上传成功！已将 ${synced} 个文件同步到云端，他人约 12 秒内可见。`,
+      });
     } catch (err) {
       console.error(err);
-      alert(err?.message || "附件上传失败，请重试。");
+      const msg = err?.message || "附件上传失败，请重试。";
+      alert(
+        cloudSyncFailed
+          ? `${msg}\n\n当前云端未就绪，请先点右上角「重试」，待显示「云端已同步」后再上传。`
+          : msg,
+      );
       return;
     } finally {
       setUploadProgress(null);
@@ -2509,7 +2615,6 @@ function TaskDetail({
     }
     setPendingTaskFiles([]);
     setTaskUploadInputKey((k) => k + 1);
-    setToastPayload({ key: Date.now(), message: `上传成功！已将 ${n} 个文件同步到任务` });
   };
 
   const timelineLogs = useMemo(() => {
@@ -2613,10 +2718,15 @@ function TaskDetail({
           <div className="section-title"><h3>SOP 和附件</h3></div>
           {!inTrash && (
             <>
+              {uploadBlocked && (
+                <div className="cloud-upload-guard" role="status">
+                  {uploadBlockReason}
+                </div>
+              )}
               <p className="muted upload-flow-hint">
-                本栏附件会出现在<strong>下方列表</strong>；若在「留言区」选文件，附件会挂在<strong>对应留言下方</strong>。选文件后务必点<strong>提交上传</strong>才会同步给他人。
+                本栏附件会出现在<strong>下方列表</strong>；若在「留言区」选文件，附件会挂在<strong>对应留言下方</strong>。选文件后务必点<strong>提交上传</strong>才会同步给他人。单文件 ≤ {MAX_INLINE_FILE_MB}MB，整站数据 ≤ {MAX_CLOUD_STATE_MB}MB。
               </p>
-              <label className="upload-zone">
+              <label className={`upload-zone${uploadBlocked ? " upload-zone--blocked" : ""}`}>
                 <Upload size={20} />
                 <span>选择文件（可多选）</span>
                 <small>PDF、Word、Excel、图片、TXT、CSV、ZIP、视频；选好后点下方「提交上传」</small>
@@ -2625,6 +2735,7 @@ function TaskDetail({
                   ref={taskFileInputRef}
                   type="file"
                   multiple
+                  disabled={uploadBlocked}
                   onChange={(event) => addPendingTaskFiles(event.target.files)}
                 />
               </label>
@@ -2652,7 +2763,7 @@ function TaskDetail({
                 <button
                   type="button"
                   className="primary-btn"
-                  disabled={!pendingTaskFiles.length || taskUploadBusy}
+                  disabled={!pendingTaskFiles.length || taskUploadBusy || uploadBlocked}
                   onClick={() => void submitTaskAttachments()}
                 >
                   <Upload size={17} /> {taskUploadBusy ? "提交中…" : "提交上传"}
@@ -2693,6 +2804,11 @@ function TaskDetail({
           <div className="section-title"><h3>留言区</h3></div>
           {!inTrash && (
             <form className="comment-form" onSubmit={submitComment}>
+              {uploadBlocked && (
+                <div className="cloud-upload-guard" role="status">
+                  {uploadBlockReason}
+                </div>
+              )}
               <p className="muted upload-hint">留言区的附件显示在<strong>每条留言下方</strong>（与右侧「SOP 和附件」不是同一处）。选择文件后须点<strong>提交留言与附件</strong>才会同步给他人。</p>
               <textarea
                 value={comment}
@@ -2708,13 +2824,14 @@ function TaskDetail({
                 placeholder="输入留言，或直接粘贴图片/文件/视频"
               />
               <div className="comment-upload-row">
-                <label className="ghost-btn">
+                <label className={`ghost-btn${uploadBlocked ? " is-disabled" : ""}`}>
                   <Upload size={16} /> 选择留言附件
                   <input
                     key={`comment-upload-${task.id}-${commentUploadInputKey}`}
                     type="file"
                     multiple
                     className="hidden-input"
+                    disabled={uploadBlocked}
                     onChange={(event) => addCommentDraftFiles(event.target.files)}
                   />
                 </label>
@@ -2736,7 +2853,7 @@ function TaskDetail({
                 </div>
               )}
               <InlineUploadProgress value={uploadProgress} />
-              <button className="primary-btn" type="submit" disabled={commentSubmitBusy}>
+              <button className="primary-btn" type="submit" disabled={commentSubmitBusy || uploadBlocked}>
                 <MessageSquareText size={17} /> {commentSubmitBusy ? "提交中…" : "提交留言与附件"}
               </button>
             </form>

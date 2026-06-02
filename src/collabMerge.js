@@ -15,6 +15,14 @@ const byIdMap = (items, getId = (x) => x.id) => {
   return m;
 };
 
+/** 合并单条附件：较新的元数据优先，但保留任一侧非空的 dataUrl（避免入站/冲突合并把已上传内容抹掉） */
+const mergeAttachmentRecord = (local, remote) => {
+  const pickRemote = new Date(remote.uploadedAt || 0) >= new Date(local.uploadedAt || 0);
+  const base = pickRemote ? { ...local, ...remote } : { ...remote, ...local };
+  const dataUrl = base.dataUrl || local.dataUrl || remote.dataUrl || "";
+  return dataUrl === base.dataUrl ? base : { ...base, dataUrl };
+};
+
 const mergeAttachments = (localArr, remoteArr) => {
   const m = byIdMap(localArr);
   for (const r of remoteArr || []) {
@@ -23,8 +31,7 @@ const mergeAttachments = (localArr, remoteArr) => {
       m.set(r.id, r);
       continue;
     }
-    const l = m.get(r.id);
-    m.set(r.id, new Date(r.uploadedAt || 0) >= new Date(l.uploadedAt || 0) ? { ...l, ...r } : { ...r, ...l });
+    m.set(r.id, mergeAttachmentRecord(m.get(r.id), r));
   }
   return [...m.values()].sort((a, b) => new Date(b.uploadedAt || 0) - new Date(a.uploadedAt || 0));
 };

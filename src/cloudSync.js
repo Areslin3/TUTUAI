@@ -12,8 +12,9 @@ const CLOUD_API_URL = (() => {
   return "https://beautiful-basbousa-c7556d.netlify.app/.netlify/functions/app-state";
 })();
 
-const REQUEST_TIMEOUT_MS = 25000;
-const RETRY_DELAYS_MS = [0, 1000, 2500];
+const REQUEST_TIMEOUT_MS = 35000;
+const RETRY_DELAYS_MS = [0, 1000, 2500, 5000, 8000];
+const SAVE_RETRY_DELAYS_MS = [0, 800, 2000, 4000, 6000, 10000];
 export const MAX_CLOUD_STATE_BYTES = 5.5 * 1024 * 1024;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -129,9 +130,9 @@ const cloudRequest = async (path = "", options = {}) => {
   return parseCloudResponse(response);
 };
 
-const withCloudRetry = async (operation, { retryOnConflict = false } = {}) => {
+const withCloudRetry = async (operation, { retryOnConflict = false, delays: customDelays } = {}) => {
   let lastError = null;
-  const delays = retryOnConflict ? [...RETRY_DELAYS_MS, 400, 800] : RETRY_DELAYS_MS;
+  const delays = customDelays || (retryOnConflict ? [...RETRY_DELAYS_MS, 400, 800] : RETRY_DELAYS_MS);
   for (let attempt = 0; attempt < delays.length; attempt += 1) {
     if (delays[attempt]) await sleep(delays[attempt]);
     try {
@@ -202,7 +203,7 @@ export const saveCloudState = async (state, { expectedUpdatedAt = null } = {}) =
       });
       return payload?.updated_at || new Date().toISOString();
     },
-    { retryOnConflict: false },
+    { retryOnConflict: false, delays: SAVE_RETRY_DELAYS_MS },
   );
 };
 
