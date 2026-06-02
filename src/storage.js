@@ -4,6 +4,18 @@ const STORAGE_KEY = "tutu-deploy-progress-state-v7";
 const SESSION_KEY = "tutu-deploy-progress-session-v1";
 
 const now = () => new Date().toISOString();
+const getLocalStorage = () => {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const probe = "__tutu_storage_probe__";
+    localStorage.setItem(probe, "1");
+    localStorage.removeItem(probe);
+    return localStorage;
+  } catch (e) {
+    console.error("localStorage unavailable:", e);
+    return null;
+  }
+};
 const makeUuid = () => {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -213,6 +225,34 @@ function normalizeAttachmentTrash(items = []) {
     uploader: item.uploader || "未知用户",
     sourceType: item.sourceType || "task",
   }));
+}
+
+function normalizeDeletedTaskTombstones(items = [], globalLogs = []) {
+  const byTaskId = new Map();
+  const add = (item) => {
+    const taskId = item?.taskId || item?.id;
+    if (!taskId) return;
+    const deletedAt = item.deletedAt || item.time || now();
+    const tombstone = {
+      taskId,
+      deletedAt,
+      actor: item.actor || "未知用户",
+      title: item.title || item.taskTitle || "",
+    };
+    const existing = byTaskId.get(taskId);
+    if (!existing || new Date(tombstone.deletedAt) >= new Date(existing.deletedAt)) {
+      byTaskId.set(taskId, tombstone);
+    }
+  };
+
+  (items || []).forEach(add);
+  (globalLogs || []).forEach((log) => {
+    if (!String(log?.action || "").includes("彻底删除了任务")) return;
+    const title = String(log.action || "").match(/「(.+)」/)?.[1] || "";
+    add({ taskId: log.taskId, deletedAt: log.time, actor: log.actor, title });
+  });
+
+  return [...byTaskId.values()].sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt));
 }
 
 const makeInitialState = () => {
@@ -432,7 +472,14 @@ const makeInitialState = () => {
 
   const normalizedTasks = normalizeTasks(tasks);
   const globalLogs = normalizedTasks.flatMap((item) => item.logs);
-  return { users: DEFAULT_USERS, tasks: normalizedTasks, trash: [], attachmentTrash: [], globalLogs };
+  return {
+    users: DEFAULT_USERS,
+    tasks: normalizedTasks,
+    trash: [],
+    attachmentTrash: [],
+    deletedTaskTombstones: [],
+    globalLogs,
+  };
 };
 
 export const buildInitialState = () => makeInitialState();
@@ -460,18 +507,22 @@ export const normalizeState = (state) => {
   const normalizedTrash = normalizeTrash(parsed.trash || []);
   const normalizedTasks = normalizeTasks(parsed.tasks || []);
   const normalizedUsers = normalizeUsers(parsed.users || []);
+  const normalizedGlobalLogs = normalizeGlobalLogs(parsed.globalLogs || [], normalizedTasks, normalizedTrash);
   return {
     users: normalizedUsers,
     tasks: normalizedTasks,
     trash: normalizedTrash,
     attachmentTrash: normalizeAttachmentTrash(parsed.attachmentTrash || []),
-    globalLogs: normalizeGlobalLogs(parsed.globalLogs || [], normalizedTasks, normalizedTrash),
+    deletedTaskTombstones: normalizeDeletedTaskTombstones(parsed.deletedTaskTombstones || [], normalizedGlobalLogs),
+    globalLogs: normalizedGlobalLogs,
   };
 };
 
 const tryWriteStore = (payload) => {
+  const store = getLocalStorage();
+  if (!store) return false;
   try {
-    localStorage.setItem(STORAGE_KEY, typeof payload === "string" ? payload : JSON.stringify(payload));
+    store.setItem(STORAGE_KEY, typeof payload === "string" ? payload : JSON.stringify(payload));
     return true;
   } catch (e) {
     console.error("localStorage write failed:", e);
@@ -480,7 +531,15 @@ const tryWriteStore = (payload) => {
 };
 
 export const loadState = () => {
-  const raw = localStorage.getItem(STORAGE_KEY);
+  const store = getLocalStorage();
+  if (!store) return makeInitialState();
+
+  let raw = null;
+  try {
+    raw = store.getItem(STORAGE_KEY);
+  } catch (e) {
+    console.error("localStorage read failed:", e);
+  }
   if (!raw) {
     const initial = makeInitialState();
     tryWriteStore(initial);
@@ -511,7 +570,15 @@ export const saveState = (state) => {
 };
 
 export const loadSession = () => {
-  const raw = localStorage.getItem(SESSION_KEY);
+  const store = getLocalStorage();
+  if (!store) return null;
+
+  let raw = null;
+  try {
+    raw = store.getItem(SESSION_KEY);
+  } catch (e) {
+    console.error("session read failed:", e);
+  }
   if (!raw) return null;
   try {
     const session = JSON.parse(raw);
@@ -521,16 +588,34 @@ export const loadSession = () => {
   } catch {
     // Ignore invalid session state.
   }
-  localStorage.removeItem(SESSION_KEY);
+  try {
+    store.removeItem(SESSION_KEY);
+  } catch {
+    // Ignore cleanup failures.
+  }
   return null;
 };
 
 export const saveSession = (user) => {
-  localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+  const store = getLocalStorage();
+  if (!store) return false;
+  try {
+    store.setItem(SESSION_KEY, JSON.stringify(user));
+    return true;
+  } catch (e) {
+    console.error("session write failed:", e);
+    return false;
+  }
 };
 
 export const clearSession = () => {
-  localStorage.removeItem(SESSION_KEY);
+  const store = getLocalStorage();
+  if (!store) return;
+  try {
+    store.removeItem(SESSION_KEY);
+  } catch {
+    // Ignore cleanup failures.
+  }
 };
 
 export const makeId = id;

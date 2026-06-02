@@ -68,6 +68,122 @@ const idSig = (arr) =>
     .sort()
     .join("|");
 
+const lifecycleTime = (item) =>
+  Math.max(
+    new Date(item?.updatedAt || 0).getTime() || 0,
+    new Date(item?.deletedAt || 0).getTime() || 0,
+    new Date(item?.createdAt || 0).getTime() || 0,
+  );
+
+const listSig = (arr) =>
+  JSON.stringify(
+    [...(arr || [])]
+      .map((x) => [x?.id || "", x?.updatedAt || "", x?.deletedAt || ""])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+  );
+
+const tombstoneSig = (arr) =>
+  JSON.stringify(
+    [...(arr || [])]
+      .map((x) => [x?.taskId || x?.id || "", x?.deletedAt || x?.time || ""])
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+  );
+
+const mergeTaskKeepingBase = (base, other) => {
+  const merged = mergeTaskPayload(base, other || {});
+  delete merged._mergeChanged;
+  return merged;
+};
+
+const reconcileActiveAndTrash = (tasks, trash) => {
+  const beforeTaskSig = listSig(tasks);
+  const beforeTrashSig = listSig(trash);
+  const activeById = byIdMap(tasks || []);
+  const trashById = byIdMap(trash || []);
+
+  for (const [taskId, activeTask] of activeById) {
+    const trashedTask = trashById.get(taskId);
+    if (!trashedTask) continue;
+
+    if (lifecycleTime(trashedTask) >= lifecycleTime(activeTask)) {
+      activeById.delete(taskId);
+      trashById.set(taskId, {
+        ...mergeTaskKeepingBase(trashedTask, activeTask),
+        deletedAt: trashedTask.deletedAt || trashedTask.updatedAt,
+      });
+    } else {
+      trashById.delete(taskId);
+      const restored = mergeTaskKeepingBase(activeTask, trashedTask);
+      delete restored.deletedAt;
+      activeById.set(taskId, restored);
+    }
+  }
+
+  const reconciledTasks = [...activeById.values()];
+  const reconciledTrash = [...trashById.values()];
+  return {
+    tasks: reconciledTasks,
+    trash: reconciledTrash,
+    changed: beforeTaskSig !== listSig(reconciledTasks) || beforeTrashSig !== listSig(reconciledTrash),
+  };
+};
+
+const extractTombstonesFromLogs = (logs) =>
+  (logs || [])
+    .filter((log) => log?.taskId && String(log.action || "").includes("彻底删除了任务"))
+    .map((log) => ({
+      taskId: log.taskId,
+      deletedAt: log.time,
+      actor: log.actor,
+      title: String(log.action || "").match(/「(.+)」/)?.[1] || "",
+    }));
+
+const mergeDeletedTaskTombstones = (localArr, remoteArr, globalLogs = []) => {
+  const before = tombstoneSig(localArr);
+  const byTaskId = new Map();
+  const add = (item) => {
+    const taskId = item?.taskId || item?.id;
+    if (!taskId) return;
+    const deletedAt = item.deletedAt || item.time;
+    if (!deletedAt) return;
+    const tombstone = {
+      taskId,
+      deletedAt,
+      actor: item.actor || "未知用户",
+      title: item.title || item.taskTitle || "",
+    };
+    const existing = byTaskId.get(taskId);
+    if (!existing || new Date(tombstone.deletedAt) >= new Date(existing.deletedAt)) {
+      byTaskId.set(taskId, tombstone);
+    }
+  };
+
+  (localArr || []).forEach(add);
+  (remoteArr || []).forEach(add);
+  extractTombstonesFromLogs(globalLogs).forEach(add);
+
+  const deletedTaskTombstones = [...byTaskId.values()].sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt));
+  return {
+    deletedTaskTombstones,
+    changed: before !== tombstoneSig(deletedTaskTombstones),
+  };
+};
+
+const applyDeletedTaskTombstones = (tasks, trash, tombstones) => {
+  const beforeTaskSig = listSig(tasks);
+  const beforeTrashSig = listSig(trash);
+  const deletedIds = new Set((tombstones || []).map((item) => item?.taskId).filter(Boolean));
+  if (!deletedIds.size) return { tasks, trash, changed: false };
+
+  const filteredTasks = (tasks || []).filter((task) => !deletedIds.has(task?.id));
+  const filteredTrash = (trash || []).filter((task) => !deletedIds.has(task?.id));
+  return {
+    tasks: filteredTasks,
+    trash: filteredTrash,
+    changed: beforeTaskSig !== listSig(filteredTasks) || beforeTrashSig !== listSig(filteredTrash),
+  };
+};
+
 /** 出站保存：本地改动优先合并远端多出的附件/留言/日志 */
 const mergeTaskPayload = (localTask, remoteTask) => {
   const at = mergeAttachments(localTask.attachments || [], remoteTask.attachments || []);
@@ -220,13 +336,26 @@ export function mergeCollaborativeState(local, remote) {
   const { globalLogs, changed: gc } = mergeGlobalLogs(local.globalLogs || [], remote.globalLogs || []);
   if (gc) changed = true;
 
+  const { deletedTaskTombstones, changed: dc } = mergeDeletedTaskTombstones(
+    local.deletedTaskTombstones || [],
+    remote.deletedTaskTombstones || [],
+    globalLogs,
+  );
+  if (dc) changed = true;
+
+  const reconciled = reconcileActiveAndTrash(tasks, trash);
+  if (reconciled.changed) changed = true;
+  const filtered = applyDeletedTaskTombstones(reconciled.tasks, reconciled.trash, deletedTaskTombstones);
+  if (filtered.changed) changed = true;
+
   return {
     state: {
       ...local,
-      tasks,
+      tasks: filtered.tasks,
       users,
-      trash,
+      trash: filtered.trash,
       attachmentTrash,
+      deletedTaskTombstones,
       globalLogs,
     },
     changed,
@@ -247,14 +376,22 @@ export function mergeInboundCollaborativeState(prev, remote) {
   const { tasks: trash } = mergeInboundTaskList(prev.trash || [], remote.trash || []);
   const { attachmentTrash } = mergeAttachmentTrash(prev.attachmentTrash || [], remote.attachmentTrash || []);
   const { globalLogs } = mergeGlobalLogs(prev.globalLogs || [], remote.globalLogs || []);
+  const { deletedTaskTombstones } = mergeDeletedTaskTombstones(
+    prev.deletedTaskTombstones || [],
+    remote.deletedTaskTombstones || [],
+    globalLogs,
+  );
+  const reconciled = reconcileActiveAndTrash(tasks, trash);
+  const filtered = applyDeletedTaskTombstones(reconciled.tasks, reconciled.trash, deletedTaskTombstones);
 
   return {
     state: {
       ...prev,
-      tasks,
+      tasks: filtered.tasks,
       users,
-      trash,
+      trash: filtered.trash,
       attachmentTrash,
+      deletedTaskTombstones,
       globalLogs,
     },
   };

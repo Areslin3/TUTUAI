@@ -10,14 +10,29 @@ const SUPABASE_ANON_KEY = (import.meta.env.VITE_SUPABASE_ANON_KEY || DEFAULT_SUP
 
 const TABLE_NAME = "app_state";
 const STATE_ROW_ID = "main";
+const REQUEST_TIMEOUT_MS = 15000;
 
 let client = null;
 
+const isProbablySupabaseUrl = (value) => /^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(value);
+
 const getClient = () => {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
+  if (!isProbablySupabaseUrl(SUPABASE_URL)) return null;
   if (!client) {
     client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: false },
+      global: {
+        fetch: async (url, options = {}) => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+          try {
+            return await fetch(url, { ...options, signal: controller.signal });
+          } finally {
+            clearTimeout(timer);
+          }
+        },
+      },
     });
   }
   return client;
@@ -64,9 +79,13 @@ export const saveCloudState = async (state) => {
     updated_at: new Date().toISOString(),
   };
 
-  const { error } = await supabase.from(TABLE_NAME).upsert(payload, { onConflict: "id" });
+  const { data, error } = await supabase
+    .from(TABLE_NAME)
+    .upsert(payload, { onConflict: "id" })
+    .select("updated_at")
+    .maybeSingle();
   if (error) throw error;
-  return payload.updated_at;
+  return data?.updated_at || payload.updated_at;
 };
 
 /**

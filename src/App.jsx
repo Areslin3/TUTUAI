@@ -208,6 +208,7 @@ const stateRevision = (state) =>
     ]),
     trash: (state?.trash || []).map((task) => [task.id, task.deletedAt, task.updatedAt]),
     attachmentTrash: (state?.attachmentTrash || []).map((att) => [att.id, att.deletedAt]),
+    deletedTaskTombstones: (state?.deletedTaskTombstones || []).map((item) => [item.taskId, item.deletedAt]),
     globalLogs: (state?.globalLogs || []).map((log) => log.id),
   });
 
@@ -767,6 +768,10 @@ function App() {
     persist({
       ...current,
       trash: (current.trash || []).filter((item) => item.id !== taskId),
+      deletedTaskTombstones: [
+        { taskId, deletedAt: at, actor, title: trashItem.title },
+        ...(current.deletedTaskTombstones || []),
+      ],
       globalLogs: [log, ...current.globalLogs],
     });
   };
