@@ -196,6 +196,11 @@ const hasCoreStateShape = (state) =>
   Boolean(state) && Array.isArray(state.users) && Array.isArray(state.tasks);
 const isEmptyCoreState = (state) =>
   hasCoreStateShape(state) && state.users.length === 0 && state.tasks.length === 0;
+const hasUsableLocalState = (state) => hasCoreStateShape(state) && !isEmptyCoreState(state);
+const pickInitialCloudSeed = (localState, fallbackState) => {
+  const local = normalizeState(localState);
+  return hasUsableLocalState(local) ? local : fallbackState;
+};
 const stateRevision = (state) =>
   JSON.stringify({
     users: (state?.users || []).map((user) => [user.id, user.username, user.role]),
@@ -207,8 +212,15 @@ const stateRevision = (state) =>
       task.progress,
       task.owner,
       task.updatedAt,
-      (task.attachments || []).map((att) => att.id),
-      (task.comments || []).map((comment) => [comment.id, (comment.attachments || []).map((att) => att.id)]),
+      task.description,
+      task.demand,
+      (task.attachments || []).map((att) => [att.id, att.uploadedAt, att.size]),
+      (task.comments || []).map((comment) => [
+        comment.id,
+        comment.time,
+        comment.content,
+        (comment.attachments || []).map((att) => [att.id, att.uploadedAt, att.size]),
+      ]),
       (task.logs || []).map((log) => log.id),
     ]),
     trash: (state?.trash || []).map((task) => [task.id, task.deletedAt, task.updatedAt]),
@@ -347,19 +359,15 @@ function App() {
       return normalizedNext;
     }
 
-    if (!requireCloud) {
-      applyLocalState(normalizedNext);
-      writeRevision = localRevisionRef.current;
-      pendingLocalRevisionRef.current = writeRevision;
-    }
+    applyLocalState(normalizedNext);
+    writeRevision = localRevisionRef.current;
+    pendingLocalRevisionRef.current = writeRevision;
 
     const saveJob = async () => {
-      if (requireCloud) {
-        setSyncState({
-          status: "同步中",
-          detail: "正在把附件写入云端...",
-        });
-      }
+      setSyncState({
+        status: "同步中",
+        detail: requireCloud ? "正在把附件写入云端..." : "正在保存到云端...",
+      });
 
       const finishSavedState = (toSave, updatedAt, remoteRowAt) => {
         if (updatedAt) lastRemoteUpdatedAtRef.current = updatedAt;
@@ -681,6 +689,12 @@ function App() {
     if (task?.module) setActiveModule(task.module);
     setSelectedTaskId(taskId);
     setActiveView("detail");
+  };
+
+  const persistFireAndForget = (next) => {
+    void persist(next).catch((error) => {
+      console.warn("后台同步失败:", error);
+    });
   };
 
   const saveTask = (formTask) => {
@@ -1036,7 +1050,7 @@ function App() {
       return { ...task, order };
     });
 
-    void persist({ ...current, tasks, globalLogs: [log, ...current.globalLogs] });
+    void persistFireAndForget({ ...current, tasks, globalLogs: [log, ...current.globalLogs] });
   };
 
   const reorderTask = (targetId) => {
@@ -1080,7 +1094,7 @@ function App() {
       return { ...task, order };
     });
 
-    void persist({ ...current, tasks, globalLogs: [log, ...current.globalLogs] });
+    void persistFireAndForget({ ...current, tasks, globalLogs: [log, ...current.globalLogs] });
     setDraggedTaskId(null);
   };
 
@@ -1122,7 +1136,7 @@ function App() {
       return { ...task, dashboardOrder };
     });
 
-    void persist({ ...current, tasks, globalLogs: [log, ...current.globalLogs] });
+    void persistFireAndForget({ ...current, tasks, globalLogs: [log, ...current.globalLogs] });
   };
 
   const reorderDashboardTask = (targetId) => {
@@ -1419,31 +1433,36 @@ function App() {
             detail: formatSyncDetail(`最后同步：${formatTime(remoteAt || new Date().toISOString())}`),
           });
         } else if (isEmptyCoreState(remoteState)) {
-          applyLocalState(fallbackState);
-          const at = await saveCloudState(fallbackState, { expectedUpdatedAt: remoteAt });
+          const toSeed = pickInitialCloudSeed(dataRef.current, fallbackState);
+          applyLocalState(toSeed);
+          const at = await saveCloudState(toSeed, { expectedUpdatedAt: remoteAt });
           if (cancelled) return;
           lastRemoteUpdatedAtRef.current = at || lastRemoteUpdatedAtRef.current;
           setSyncState({
             status: "云端已初始化",
-            detail: "已写入默认模块与任务数据",
+            detail: hasUsableLocalState(toSeed) ? "已上传本地数据到云端" : "已写入默认模块与任务数据",
           });
         } else if (remoteState) {
-          applyLocalState(fallbackState);
-          const at = await saveCloudState(fallbackState, { expectedUpdatedAt: remoteAt });
+          const toSeed = pickInitialCloudSeed(dataRef.current, fallbackState);
+          applyLocalState(toSeed);
+          const at = await saveCloudState(toSeed, { expectedUpdatedAt: remoteAt });
           if (cancelled) return;
           lastRemoteUpdatedAtRef.current = at || lastRemoteUpdatedAtRef.current;
           setSyncState({
             status: "云端已修复",
-            detail: "检测到损坏数据，已自动覆盖为默认模块数据",
+            detail: hasUsableLocalState(toSeed)
+              ? "检测到损坏云端数据，已用本地数据修复"
+              : "检测到损坏数据，已自动覆盖为默认模块数据",
           });
         } else {
-          const at = await saveCloudState(fallbackState);
-          applyLocalState(fallbackState);
+          const toSeed = pickInitialCloudSeed(dataRef.current, fallbackState);
+          const at = await saveCloudState(toSeed);
+          applyLocalState(toSeed);
           if (cancelled) return;
           lastRemoteUpdatedAtRef.current = at || lastRemoteUpdatedAtRef.current;
           setSyncState({
             status: "云端已初始化",
-            detail: "已上传当前本地数据",
+            detail: hasUsableLocalState(toSeed) ? "已上传当前本地数据" : "已写入默认模块与任务数据",
           });
         }
         initialized = true;
