@@ -21,4 +21,4 @@ if ($status) {
 }
 git push github gh-pages:main
 git push origin gh-pages
-Write-Host "GitHub Pages 与 Gitee 已同步完成。"
+Write-Host "Done: GitHub Pages and Gitee synced."
