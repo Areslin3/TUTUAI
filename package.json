@@ -8,7 +8,9 @@
     "build": "vite build && node scripts/copy-entry.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "deploy:netlify": "npm run build && netlify deploy --prod --dir=dist",
-    "deploy:pages": "powershell -ExecutionPolicy Bypass -File scripts/deploy-pages.ps1"
+    "deploy:pages": "powershell -ExecutionPolicy Bypass -File scripts/deploy-pages.ps1",
+    "deploy:source": "powershell -ExecutionPolicy Bypass -File scripts/deploy-source.ps1",
+    "deploy:all": "powershell -ExecutionPolicy Bypass -File scripts/deploy-all.ps1"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^6.0.2",
