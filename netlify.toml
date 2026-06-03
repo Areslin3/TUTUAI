@@ -14,3 +14,8 @@
   from = "/api/app-state/*"
   to = "/.netlify/functions/app-state/:splat"
   status = 200
+
+[[redirects]]
+  from = "/api/app-attachments"
+  to = "/.netlify/functions/app-attachments"
+  status = 200

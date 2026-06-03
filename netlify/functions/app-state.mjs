@@ -137,6 +137,13 @@ export default async (request) => {
         );
       }
 
+      if (current?.data && currentUpdatedAt) {
+        const backupKey = "main:backup:latest";
+        await store.setJSON(backupKey, current.data, {
+          metadata: { backed_up_at: new Date().toISOString(), from_updated_at: currentUpdatedAt },
+        });
+      }
+
       const updatedAt = new Date().toISOString();
       await store.setJSON(STATE_KEY, body.state, { metadata: { updated_at: updatedAt } });
       return jsonResponse({ updated_at: updatedAt }, 200, { "x-updated-at": updatedAt });

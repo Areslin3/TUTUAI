@@ -50,7 +50,6 @@ import {
   CloudConflictError,
   CloudPayloadTooLargeError,
   ensureCloudClient,
-  estimateStateBytes,
   fetchCloudStateWithMeta,
   fetchCloudUpdatedAt,
   getCloudTransportLabel,
@@ -62,6 +61,37 @@ import {
   subscribeAppStateRemoteChanges,
 } from "./cloudSync.js";
 import { mergeCollaborativeState, mergeInboundCollaborativeState } from "./collabMerge.js";
+import {
+  deleteAttachmentBlob,
+  estimateCloudPayloadBytes,
+  MAX_ATTACHMENT_BLOB_BYTES,
+  migrateInlineAttachmentsToBlob,
+  resolveAttachmentContent,
+  saveAttachmentBlob,
+  stripAttachmentsForCloud,
+} from "./attachmentStorage.js";
+
+const MAX_ATTACHMENT_BLOB_MB = MAX_ATTACHMENT_BLOB_BYTES / (1024 * 1024);
+
+async function storeNewAttachmentsInBlob(uploads) {
+  const stored = [];
+  for (const upload of uploads || []) {
+    if (!upload?.dataUrl) {
+      stored.push(upload);
+      continue;
+    }
+    if (upload.size > MAX_ATTACHMENT_BLOB_BYTES) {
+      throw new Error(`文件「${upload.name}」超过 ${MAX_ATTACHMENT_BLOB_MB}MB 云端单文件上限，请压缩后重试。`);
+    }
+    await saveAttachmentBlob(upload.id, upload);
+    stored.push({
+      ...upload,
+      storage: "blob",
+      blobKey: upload.id,
+    });
+  }
+  return stored;
+}
 
 const formatTime = (value) =>
   new Intl.DateTimeFormat("zh-CN", {
@@ -156,8 +186,8 @@ const cinematicMotion = {
   transition: { type: "spring", bounce: 0, duration: 0.8 },
 };
 
-const MAX_INLINE_FILE_BYTES = 8 * 1024 * 1024;
-const MAX_INLINE_FILE_MB = 8;
+const MAX_INLINE_FILE_BYTES = MAX_ATTACHMENT_BLOB_BYTES;
+const MAX_INLINE_FILE_MB = MAX_ATTACHMENT_BLOB_MB;
 const MAX_CLOUD_STATE_MB = Math.round((MAX_CLOUD_STATE_BYTES / 1024 / 1024) * 10) / 10;
 
 const formatBytes = (bytes) => {
@@ -167,13 +197,13 @@ const formatBytes = (bytes) => {
 };
 
 const assertCloudWritableState = (state, { requirePayload = false } = {}) => {
-  const bytes = estimateStateBytes(state);
+  const bytes = estimateCloudPayloadBytes(state);
   if (bytes > MAX_CLOUD_STATE_BYTES) {
     throw new CloudPayloadTooLargeError(bytes);
   }
   if (requirePayload && bytes > MAX_CLOUD_STATE_BYTES * 0.92) {
     throw new Error(
-      `云端数据已接近上限（约 ${formatBytes(bytes)} / ${MAX_CLOUD_STATE_MB}MB），请先删除部分旧附件后再上传，否则无法同步给他人。`,
+      `云端元数据已接近上限（约 ${formatBytes(bytes)} / ${MAX_CLOUD_STATE_MB}MB），请先删除部分旧附件后再上传。`,
     );
   }
   return bytes;
@@ -445,8 +475,24 @@ function App() {
           toSave = normalizeState(localForMerge);
         }
 
+        const { state: migratedState, changed: migratedChanged } = await migrateInlineAttachmentsToBlob(toSave);
+        if (migratedChanged) {
+          toSave = normalizeState(migratedState);
+          if (localRevisionRef.current === writeRevision) {
+            applyLocalState(toSave);
+            writeRevision = localRevisionRef.current;
+            pendingLocalRevisionRef.current = writeRevision;
+          }
+        }
+
+        const cloudPayload = stripAttachmentsForCloud(toSave);
+        const payloadBytes = estimateCloudPayloadBytes(toSave);
+        if (payloadBytes > MAX_CLOUD_STATE_BYTES) {
+          throw new CloudPayloadTooLargeError(payloadBytes);
+        }
+
         try {
-          const updatedAt = await saveCloudState(toSave, { expectedUpdatedAt: remoteRowAt });
+          const updatedAt = await saveCloudState(cloudPayload, { expectedUpdatedAt: remoteRowAt });
           const saved = finishSavedState(toSave, updatedAt, remoteRowAt);
           if (requireCloud) pullRemoteAfterSaveRef.current?.();
           return saved;
@@ -1012,6 +1058,7 @@ function App() {
       ...current,
       attachmentTrash: (current.attachmentTrash || []).filter((att) => att.id !== attachmentId),
     });
+    void deleteAttachmentBlob(item.blobKey || item.id);
   };
 
   const deleteLogEntry = (taskId, logId) => {
@@ -1242,6 +1289,7 @@ function App() {
         size: file.size,
         dataUrl,
       }));
+      uploads = await storeNewAttachmentsInBlob(uploads);
     }
     const comment = {
       id: makeId("comment"),
@@ -1304,7 +1352,7 @@ function App() {
       );
     }
     const batchAt = timestamp();
-    const uploads = readResults.map(({ file, dataUrl }) => ({
+    let uploads = readResults.map(({ file, dataUrl }) => ({
       id: makeId("att"),
       taskId,
       name: file.name,
@@ -1314,6 +1362,7 @@ function App() {
       size: file.size,
       dataUrl,
     }));
+    uploads = await storeNewAttachmentsInBlob(uploads);
 
     const current = dataRef.current;
     const target = current.tasks.find((task) => task.id === taskId);
@@ -1350,31 +1399,38 @@ function App() {
     return { uploadedCount: uploads.length, skippedLargeCount: skippedLarge.length };
   };
 
-  const downloadAttachment = (attachment) => {
-    if (!attachment.dataUrl) {
-      alert("这个附件没有可下载的本地内容；新上传且小于 8MB 的文件可以直接下载。");
+  const downloadAttachment = async (attachment) => {
+    const resolved = await resolveAttachmentContent(attachment);
+    if (!resolved.dataUrl) {
+      alert("这个附件没有可下载的云端内容；请确认上传成功或稍后重试。");
       return;
     }
     const link = document.createElement("a");
-    link.href = attachment.dataUrl;
-    link.download = attachment.name;
+    link.href = resolved.dataUrl;
+    link.download = resolved.name;
     link.click();
   };
 
-  const previewAttachment = (attachment) => {
-    if (!attachment.dataUrl) {
-      alert("这个附件没有可预览的本地内容；请重新上传文件后预览。");
+  const previewAttachment = async (attachment) => {
+    const resolved = await resolveAttachmentContent(attachment);
+    if (!resolved.dataUrl) {
+      alert("这个附件没有可预览的云端内容；请确认上传成功或稍后重试。");
       return;
     }
-    setPreviewAttachmentItem(attachment);
+    if (!canPreviewAttachment(resolved)) {
+      alert("这个文件类型暂不支持预览，请下载后查看。");
+      return;
+    }
+    setPreviewAttachmentItem(resolved);
   };
 
-  const openAttachment = (attachment) => {
-    if (!attachment.dataUrl) {
-      alert("这个附件没有可打开的本地内容；请重新上传文件后打开。");
+  const openAttachment = async (attachment) => {
+    const resolved = await resolveAttachmentContent(attachment);
+    if (!resolved.dataUrl) {
+      alert("这个附件没有可打开的云端内容；请确认上传成功或稍后重试。");
       return;
     }
-    window.open(attachment.dataUrl, "_blank", "noopener,noreferrer");
+    window.open(resolved.dataUrl, "_blank", "noopener,noreferrer");
   };
 
   useEffect(() => {
@@ -2974,22 +3030,24 @@ function LogDetailModal({ log, onClose }) {
   const after = details?.after || snapshot || null;
   const changes = details?.changes || null;
 
-  const downloadable = (att) => Boolean(att?.dataUrl);
-  const openAtt = (att) => {
-    if (!att?.dataUrl) {
-      alert("这个附件没有可打开的本地内容；请重新上传文件后再查看。");
+  const hasAttachmentContent = (att) => Boolean(att?.dataUrl || att?.blobKey || att?.storage === "blob");
+  const openAtt = async (att) => {
+    const resolved = await resolveAttachmentContent(att);
+    if (!resolved?.dataUrl) {
+      alert("这个附件没有可打开的云端内容；请确认上传成功或稍后重试。");
       return;
     }
-    window.open(att.dataUrl, "_blank", "noopener,noreferrer");
+    window.open(resolved.dataUrl, "_blank", "noopener,noreferrer");
   };
-  const downloadAtt = (att) => {
-    if (!att?.dataUrl) {
-      alert("这个附件没有可下载的本地内容；新上传且小于 8MB 的文件可以直接下载。");
+  const downloadAtt = async (att) => {
+    const resolved = await resolveAttachmentContent(att);
+    if (!resolved?.dataUrl) {
+      alert("这个附件没有可下载的云端内容；请确认上传成功或稍后重试。");
       return;
     }
     const link = document.createElement("a");
-    link.href = att.dataUrl;
-    link.download = att.name || "attachment";
+    link.href = resolved.dataUrl;
+    link.download = resolved.name || "attachment";
     link.click();
   };
 
@@ -3002,8 +3060,8 @@ function LogDetailModal({ log, onClose }) {
             <strong>{att.name}</strong>
             <small>{att.uploader || "-"} · {att.uploadedAt ? formatTime(att.uploadedAt) : "-"}</small>
           </span>
-          <button className="icon-btn" onClick={() => openAtt(att)} title="打开" disabled={!downloadable(att)}><ExternalLink size={15} /></button>
-          <button className="icon-btn" onClick={() => downloadAtt(att)} title="下载" disabled={!downloadable(att)}><Download size={15} /></button>
+          <button className="icon-btn" onClick={() => void openAtt(att)} title="打开" disabled={!hasAttachmentContent(att)}><ExternalLink size={15} /></button>
+          <button className="icon-btn" onClick={() => void downloadAtt(att)} title="下载" disabled={!hasAttachmentContent(att)}><Download size={15} /></button>
         </div>
       ))}
       {!(atts || []).length && <p className="muted">当时没有附件</p>}

@@ -15,12 +15,17 @@ const byIdMap = (items, getId = (x) => x.id) => {
   return m;
 };
 
-/** 合并单条附件：较新的元数据优先，但保留任一侧非空的 dataUrl（避免入站/冲突合并把已上传内容抹掉） */
+/** 合并单条附件：较新的元数据优先，但保留任一侧非空的 dataUrl / blobKey */
 const mergeAttachmentRecord = (local, remote) => {
   const pickRemote = new Date(remote.uploadedAt || 0) >= new Date(local.uploadedAt || 0);
   const base = pickRemote ? { ...local, ...remote } : { ...remote, ...local };
   const dataUrl = base.dataUrl || local.dataUrl || remote.dataUrl || "";
-  return dataUrl === base.dataUrl ? base : { ...base, dataUrl };
+  const blobKey = base.blobKey || local.blobKey || remote.blobKey || "";
+  let storage = base.storage || local.storage || remote.storage || "inline";
+  if (blobKey && !dataUrl) storage = "blob";
+  else if (dataUrl && !blobKey) storage = "inline";
+  else if (blobKey && dataUrl) storage = pickRemote ? remote.storage || "blob" : local.storage || "blob";
+  return { ...base, dataUrl, blobKey, storage };
 };
 
 const mergeAttachments = (localArr, remoteArr) => {

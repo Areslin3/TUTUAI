@@ -13,13 +13,17 @@
 ## 数据与同步
 
 - **本地**：浏览器 `localStorage` 缓存，离线可浏览已加载数据。
-- **云端**：Netlify Functions + Blobs，单行 JSON 存整站状态（任务、用户、留言、附件 Base64、回收站）。
-- **机制**：保存前拉取合并 → 乐观锁写入；12 秒轮询；切回页面/网络恢复时立即拉取；冲突自动重试；失败可点右上角「重试」。
+- **云端（混合存储）**：
+  - **主状态 JSON**（Netlify Blobs `tutu-app-state` / key `main`）：任务、用户、留言元数据、附件引用（`storage: blob` + `blobKey`）。
+  - **附件 Blob**（`tutu-app-attachments` / key `att:{id}`）：单文件 ≤4MB，与主 JSON 分离，避免 5.5MB 整包上限。
+  - 写入前自动备份上一版到 `main:backup:latest`。
+- **机制**：保存前 merge → 大附件迁移到独立 Blob → 主 JSON 剥离 dataUrl → 乐观锁 PUT；12 秒轮询；切页/网络恢复拉取。
 
-默认云端 API：
+默认 API：
 
 ```
 https://beautiful-basbousa-c7556d.netlify.app/.netlify/functions/app-state
+https://beautiful-basbousa-c7556d.netlify.app/.netlify/functions/app-attachments?id={附件ID}
 ```
 
 可选 `.env` 覆盖（见 `.env.example`）：
@@ -81,8 +85,8 @@ npm run deploy:all
 1. 右上角须显示 **「云端已同步」**（失败时点 **重试**）。
 2. 任务详情须点 **「提交上传」** 或留言区的 **「提交留言与附件」**（只选文件不会同步）。
 3. 等约 **12 秒** 轮询，或刷新页面。
-4. 单文件 **>8MB** 只保留文件名，无下载内容；整站 JSON **>5.5MB** 会同步失败，需删除旧附件。
-5. 若本机能看到、他人看不到：多为云端写入失败或体积超限；上传成功提示会说明「他人约 12 秒内可见」。
+4. 单文件 **>4MB** 无法上传至附件 Blob；主 JSON 仍约 **5.5MB** 元数据上限。
+5. 旧版 inline Base64 附件会在下次保存时自动迁移到独立 Blob（>48KB）。
 
 **GitHub push 失败（443 连接重置）**
 

@@ -130,6 +130,8 @@ function normalizeAttachments(items = [], taskId = "") {
     type: attachment.type || "application/octet-stream",
     size: attachment.size || 0,
     dataUrl: attachment.dataUrl || "",
+    storage: attachment.storage || (attachment.blobKey ? "blob" : attachment.dataUrl ? "inline" : "inline"),
+    blobKey: attachment.blobKey || "",
   }));
 }
 
