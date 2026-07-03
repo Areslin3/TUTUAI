@@ -61,6 +61,7 @@ import {
   subscribeAppStateRemoteChanges,
 } from "./cloudSync.js";
 import { mergeCollaborativeState, mergeInboundCollaborativeState } from "./collabMerge.js";
+import { createSyncBroadcast } from "./syncBroadcast.js";
 import {
   deleteAttachmentBlob,
   estimateCloudPayloadBytes,
@@ -71,7 +72,7 @@ import {
   stripAttachmentsForCloud,
 } from "./attachmentStorage.js";
 
-const MAX_ATTACHMENT_BLOB_MB = MAX_ATTACHMENT_BLOB_BYTES / (1024 * 1024);
+const SYNC_POLL_MS = 5000;
 
 async function storeNewAttachmentsInBlob(uploads) {
   const stored = [];
@@ -381,6 +382,7 @@ function App() {
   const syncReadyRef = useRef(false);
   const retryCloudSyncRef = useRef(() => {});
   const pullRemoteAfterSaveRef = useRef(() => {});
+  const notifyPeerTabsRef = useRef(() => {});
   const applyLocalState = (nextState) => {
     const normalizedState = normalizeState(nextState);
     dataRef.current = normalizedState;
@@ -432,6 +434,7 @@ function App() {
       const finishSavedState = (toSave, updatedAt, remoteRowAt) => {
         if (updatedAt) lastRemoteUpdatedAtRef.current = updatedAt;
         else if (remoteRowAt) lastRemoteUpdatedAtRef.current = remoteRowAt;
+        notifyPeerTabsRef.current?.(updatedAt || remoteRowAt);
         setSyncState({
           status: "云端已同步",
           detail: `最后同步：${formatTime(updatedAt || remoteRowAt || new Date().toISOString())}${getCloudTransportLabel() ? ` · ${getCloudTransportLabel()}` : ""}`,
@@ -1449,7 +1452,7 @@ function App() {
       void persist((current) => current);
     };
 
-    /** 入站拉取：每个任务以云端主字段为准，再并上本地与云端的附件/留言/日志（与出站 persist 的合并方向不同）。 */
+    /** 入站拉取：与出站共用 LWW 合并，pending 本地写入时仍优先保留本地编辑 */
     const applyRemoteBundle = (remoteState, updatedAt, detailMsg) => {
       if (cancelled) return;
       if (!remoteState || !hasCoreStateShape(remoteState) || isEmptyCoreState(remoteState)) return;
@@ -1459,9 +1462,7 @@ function App() {
       const beforeRevision = stateRevision(current);
       const hasPendingLocalWrite =
         pendingLocalRevisionRef.current > 0 && localRevisionRef.current >= pendingLocalRevisionRef.current;
-      const { state: mergedOnce } = hasPendingLocalWrite
-        ? mergeCollaborativeState(current, normalizedRemote)
-        : mergeInboundCollaborativeState(current, normalizedRemote);
+      const { state: mergedOnce } = mergeCollaborativeState(current, normalizedRemote);
       const merged = normalizeState(mergedOnce);
       if (updatedAt) lastRemoteUpdatedAtRef.current = updatedAt;
       if (beforeRevision !== stateRevision(merged)) {
@@ -1503,7 +1504,7 @@ function App() {
           if (status === "POLLING_ONLY" || status === "PROXY_POLLING") {
             setSyncState({
               status: "轮询同步",
-              detail: formatSyncDetail("云端已连接，12 秒自动同步最新数据"),
+              detail: formatSyncDetail(`云端已连接，${SYNC_POLL_MS / 1000} 秒自动同步 · 多标签页即时同步`),
             });
           }
         },
@@ -1524,7 +1525,15 @@ function App() {
             });
           }
         })();
-      }, 12000);
+      }, SYNC_POLL_MS);
+    };
+
+    const tabSync = createSyncBroadcast((peerUpdatedAt) => {
+      if (cancelled || !peerUpdatedAt || peerUpdatedAt === lastRemoteUpdatedAtRef.current) return;
+      void pullRemoteAndMerge(`其他标签页 · ${formatTime(peerUpdatedAt)}`);
+    });
+    notifyPeerTabsRef.current = (updatedAt) => {
+      if (updatedAt) tabSync.notifyCloudUpdated(updatedAt);
     };
 
     const run = async () => {
@@ -1639,6 +1648,7 @@ function App() {
       unsubscribeRealtime();
       if (pollId != null) window.clearInterval(pollId);
       if (retryId != null) window.clearInterval(retryId);
+      tabSync.close();
     };
   }, []);
 
@@ -2583,10 +2593,10 @@ function TaskDetail({
         key: Date.now(),
         message:
           fileCount && clean
-            ? `留言已发送（含 ${fileCount} 个附件），他人约 12 秒内可见。`
+            ? `留言已发送（含 ${fileCount} 个附件），他人约 ${SYNC_POLL_MS / 1000} 秒内可见。`
             : fileCount
-              ? `已成功上传 ${fileCount} 个附件，他人约 12 秒内可见。`
-              : "留言已发送，他人约 12 秒内可见。",
+              ? `已成功上传 ${fileCount} 个附件，他人约 ${SYNC_POLL_MS / 1000} 秒内可见。`
+              : "留言已发送，他人约 ${SYNC_POLL_MS / 1000} 秒内可见。",
       });
     } catch (err) {
       console.error(err);
@@ -2653,8 +2663,8 @@ function TaskDetail({
         key: Date.now(),
         message:
           skipped > 0
-            ? `已同步 ${synced} 个文件到云端；${skipped} 个超大文件仅保留名称。他人约 12 秒内可见。`
-            : `上传成功！已将 ${synced} 个文件同步到云端，他人约 12 秒内可见。`,
+            ? `已同步 ${synced} 个文件到云端；${skipped} 个超大文件仅保留名称。他人约 ${SYNC_POLL_MS / 1000} 秒内可见。`
+            : `上传成功！已将 ${synced} 个文件同步到云端，他人约 ${SYNC_POLL_MS / 1000} 秒内可见。`,
       });
     } catch (err) {
       console.error(err);

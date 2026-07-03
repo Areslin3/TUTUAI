@@ -1,4 +1,5 @@
 import { getStore } from "@netlify/blobs";
+import { mergeCollaborativeState } from "../../shared/collabMerge.js";
 
 const STATE_KEY = "main";
 const PATH_PREFIXES = ["/.netlify/functions/app-state", "/api/app-state"];
@@ -39,6 +40,9 @@ const jsonResponse = (payload, status, extraHeaders = {}) =>
 const readCurrentEntry = async (store) => store.getWithMetadata(STATE_KEY, { type: "json" });
 
 const getRequiredToken = () => (process.env.APP_STATE_TOKEN || "").trim();
+
+const hasCoreStateShape = (state) =>
+  Boolean(state) && Array.isArray(state.users) && Array.isArray(state.tasks);
 
 const isAuthorized = (request) => {
   const required = getRequiredToken();
@@ -126,15 +130,20 @@ export default async (request) => {
       const current = await readCurrentEntry(store);
       const currentUpdatedAt = current?.metadata?.updated_at || null;
 
-      if (expectedUpdatedAt && currentUpdatedAt && expectedUpdatedAt !== currentUpdatedAt) {
-        return jsonResponse(
-          {
-            message: "Cloud state was updated by another session",
-            updated_at: currentUpdatedAt,
-            state: current?.data ?? null,
-          },
-          409,
-        );
+      let stateToWrite = body.state;
+      let mergedOnServer = false;
+
+      if (
+        current?.data &&
+        hasCoreStateShape(current.data) &&
+        hasCoreStateShape(body.state) &&
+        expectedUpdatedAt &&
+        currentUpdatedAt &&
+        expectedUpdatedAt !== currentUpdatedAt
+      ) {
+        const { state: merged } = mergeCollaborativeState(body.state, current.data);
+        stateToWrite = merged;
+        mergedOnServer = true;
       }
 
       if (current?.data && currentUpdatedAt) {
@@ -145,8 +154,12 @@ export default async (request) => {
       }
 
       const updatedAt = new Date().toISOString();
-      await store.setJSON(STATE_KEY, body.state, { metadata: { updated_at: updatedAt } });
-      return jsonResponse({ updated_at: updatedAt }, 200, { "x-updated-at": updatedAt });
+      await store.setJSON(STATE_KEY, stateToWrite, { metadata: { updated_at: updatedAt } });
+      return jsonResponse(
+        { updated_at: updatedAt, merged_on_server: mergedOnServer },
+        200,
+        { "x-updated-at": updatedAt },
+      );
     }
 
     return jsonResponse({ message: "Method not allowed" }, 405);

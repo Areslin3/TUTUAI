@@ -1,12 +1,12 @@
 # Agent 项目上下文
 
-**最后更新：** 2026-06-02（混合 Blob 存储架构）
+**最后更新：** 2026-06-02（混合 Blob + 多用户 LWW 合并）
 
 ## 目标与约束
 
 - Vite + React 任务看板；持久化采用 **Netlify Functions + 双 Blob Store**（非传统 SQL 数据库）。
 - **默认无需 `.env`**：`src/cloudSync.js` / `src/attachmentStorage.js` 内置生产 API；GitHub Pages 走 Netlify API；可用 `VITE_CLOUD_*` 覆盖。
-- 多人协作：首次拉全量；**12 秒 meta 轮询** + 切页/网络恢复拉取；保存前 merge + 乐观锁（409 重试）。
+- 多人协作：首次拉全量；**5 秒 meta 轮询** + **BroadcastChannel 多标签页** + 切页/网络恢复拉取；客户端与服务端 **LWW 合并**（冲突时服务端自动 merge）。
 
 ## 存储架构（最优实践：元数据与二进制分离）
 
@@ -22,9 +22,13 @@
 - `netlify/functions/app-state.mjs` — GET/PUT 主 JSON
 - `netlify/functions/app-attachments.mjs` — GET/PUT/DELETE 单附件
 
-客户端：`src/cloudSync.js`、`src/attachmentStorage.js`、`src/collabMerge.js`
+客户端：`src/cloudSync.js`、`src/attachmentStorage.js`、`shared/collabMerge.js`（`src/collabMerge.js` 再导出）
 
-## 为何不用 Supabase / 传统 DB（2026-06 结论）
+## 为何未采用 Yjs / Automerge（开源 CRDT）
+
+- 需 WebSocket 常驻后端（y-websocket / Automerge-repo），与当前 Netlify Functions + Blobs 架构不匹配。
+- 国内需自建同步节点；Supabase Realtime 已因不可达弃用。
+- 当前规模下 **REST + 服务端 merge + 5s 轮询** 更稳、零额外成本；若未来要亚秒级协作再评估 PartyKit / y-sweet 自建。
 
 - 曾用 Supabase：国内 `*.supabase.co` 不可达，已弃用（遗留 `supabase/setup-app_state.sql`）。
 - 业界共识（S3/Blob + DB 元数据）：大文件不应塞进 JSON/关系库 BLOB 字段；Netlify 函数请求体硬限 **6MB**，整包 JSON 不可扩展。
@@ -33,7 +37,7 @@
 ## 已知限制
 
 - 单附件 ≤4MB；主 JSON 元数据 ≤约 5.5MB。
-- 无 Realtime，协作延迟约 12 秒。
+- 无 Realtime WebSocket；协作延迟约 **5 秒**（同浏览器多标签页近即时）。
 - 未配置 Token 时 API 无鉴权；密码明文存 JSON（前端比对）。
 
 ## 附件同步排查
